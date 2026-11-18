@@ -3,6 +3,7 @@
 #include "reorder_diff_view.h"
 
 #include "processor/processor_manager.h"
+#include "ui/suggestions/suggestion_panel.h"
 #include "ui/editor_tab/editortab.h"
 #include "ui/editor_tab/main_editor.h"
 #include "ui/mainwindow/mainwindow.h"
@@ -28,6 +29,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QTextBlock>
 #include <QTextBrowser>
@@ -83,6 +85,7 @@ ReorderDock *ReorderDock::install(QMainWindow *window, EditorTab *editorTab, Pro
         toolbar->addAction(action);
     }
     connect(action, &QAction::triggered, dock, &ReorderDock::showAndAnalyze);
+    dock->m_suggestions->attachRunButton(window); // the Run banner ("Review suggestions" / "Run anyway")
 
     if (auto *mainWindow = qobject_cast<MainWindow *>(window))
     {
@@ -168,15 +171,23 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_unifiedButton->setText(tr("Unified"));
     m_unifiedButton->setCheckable(true);
     m_unifiedButton->setAutoExclusive(true);
+    m_suggestionsButton = new QToolButton(content);
+    m_suggestionsButton->setText(tr("Suggestions"));
+    m_suggestionsButton->setCheckable(true);
+    m_suggestionsButton->setAutoExclusive(true);
+    m_suggestionsButton->setToolTip(tr("One move at a time: what moved, why, the effect, and a pipeline timeline. "
+                                       "Waiting lines are underlined in the editor."));
     // the Kites theme has no style for checked buttons; show which view is on
     const QString toggleStyle = QStringLiteral("QToolButton:checked { background-color: palette(highlight); "
                                                "color: palette(highlighted-text); }");
     m_sideBySideButton->setStyleSheet(toggleStyle);
     m_unifiedButton->setStyleSheet(toggleStyle);
+    m_suggestionsButton->setStyleSheet(toggleStyle);
     status->addWidget(m_summaryLabel, 1);
     status->addWidget(m_onlyChangedCheck);
     status->addWidget(m_sideBySideButton);
     status->addWidget(m_unifiedButton);
+    status->addWidget(m_suggestionsButton);
     layout->addLayout(status);
 
     m_bannerLabel = new QLabel(content);
@@ -202,7 +213,13 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     splitter->setStretchFactor(0, 3);
     splitter->setStretchFactor(1, 2);
     splitter->setSizes({720, 380});
-    layout->addWidget(splitter, 1);
+
+    // ---- the two kinds of view: the diff (above), or the suggestions -----------------
+    m_suggestions = new SuggestionPanel(content, editorTab, processorManager);
+    m_views = new QStackedWidget(content);
+    m_views->addWidget(splitter);      // Side by side / Unified
+    m_views->addWidget(m_suggestions); // Suggestions
+    layout->addWidget(m_views, 1);
     setWidget(content);
 
     m_reanalyzeTimer = new QTimer(this);
@@ -248,6 +265,8 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
                     scrollToFirstChange();
                 }
             });
+    connect(m_suggestionsButton, &QToolButton::toggled, this, [this](bool) { updateViewMode(); });
+    connect(m_suggestions, &SuggestionPanel::reviewRequested, this, &ReorderDock::showSuggestions);
     connect(m_onlyChangedCheck, &QCheckBox::toggled, m_diffView, &ReorderDiffView::setCollapseUnchanged);
     connect(m_diffView, &ReorderDiffView::detailHovered, this,
             [this](const QString &html)
@@ -300,6 +319,7 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     syncVariantWithProcessor();
     showDetails(QString());
     updateState();
+    updateViewMode();
 }
 
 /*
@@ -439,6 +459,30 @@ void ReorderDock::showAndAnalyze()
     analyze();
 }
 
+void ReorderDock::showSuggestions()
+{
+    syncVariantWithProcessor(); // the banner counted for the selected processor
+    m_suggestionsButton->setChecked(true);
+    showAndAnalyze();
+}
+
+bool ReorderDock::suggestionsView() const
+{
+    return m_suggestionsButton->isChecked();
+}
+
+// The diff's own controls are hidden in the Suggestions view, which has its own Apply.
+void ReorderDock::updateViewMode()
+{
+    const bool suggestions = suggestionsView();
+    m_views->setCurrentIndex(suggestions ? 1 : 0);
+    m_onlyChangedCheck->setVisible(!suggestions);
+    m_copyButton->setVisible(!suggestions);
+    m_revertButton->setVisible(!suggestions);
+    m_applyButton->setVisible(!suggestions);
+    updateState();
+}
+
 void ReorderDock::showEvent(QShowEvent *event)
 {
     QDockWidget::showEvent(event);
@@ -483,6 +527,14 @@ void ReorderDock::analyze()
     scrollToFirstChange();
     showDetails(QString());
     updateState();
+
+    // the Suggestions view analyzes the same code for the same pipeline and window
+    scheduler::Options suggestionOptions;
+    suggestionOptions.forwarding = reorder::hasForwarding(options.variant);
+    suggestionOptions.hazardUnit = reorder::hasHazardUnit(options.variant);
+    suggestionOptions.window = options.windowSize;
+    m_suggestions->setOptions(suggestionOptions);
+    m_suggestions->analyze();
 }
 
 void ReorderDock::scrollToFirstChange()
@@ -813,6 +865,12 @@ void ReorderDock::updateState()
                                          .arg(colorHex(mix(background, accent, 0.14)), colorHex(accent)));
         m_bannerLabel->setText(messages.join(QStringLiteral("<br>")));
         m_bannerLabel->show();
+    }
+    if (suggestionsView())
+    {
+        // the summary and messages describe the diff; the Suggestions view shows its own
+        m_summaryLabel->clear();
+        m_bannerLabel->hide();
     }
 }
 

@@ -15,6 +15,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+class QStackedWidget;
 class QTextBrowser;
 class QTimer;
 class QToolButton;
@@ -24,13 +25,16 @@ namespace Kites
 class EditorTab;
 class ProcessorManager;
 class ReorderDiffView;
+class SuggestionPanel;
 
 /**
  * @brief Dock that suggests an instruction order with fewer pipeline stalls.
  *
  * Shows the suggestion as a diff with an explanation for every change, and
  * applies it to the editor as one undoable edit (breakpoints follow their
- * instructions). It only reads the editor text and the processor type, so it
+ * instructions). Three views can be chosen: "Side by side" and "Unified"
+ * (the diff) and "Suggestions" (one move at a time with a pipeline timeline,
+ * see SuggestionPanel). It only reads the editor text and the processor type, so it
  * does not change how the rest of Kites works.
  */
 class ReorderDock : public QDockWidget
@@ -44,6 +48,7 @@ public:
 
 public slots:
     void showAndAnalyze();
+    void showSuggestions(); ///< opens the panel on the "Suggestions" view
     void popOut();
     void dockTo(Qt::DockWidgetArea area);
     void scrollToFirstChange();
@@ -69,6 +74,8 @@ private:
     void showDetails(const QString &html);
     void jumpToLine(int line, int sourceLine, bool newSide);
     QString wrapDetails(const QString &html) const;
+    bool suggestionsView() const;
+    void updateViewMode();
 
     QMainWindow *m_window = nullptr;
     EditorTab *m_editorTab = nullptr;
@@ -82,6 +89,9 @@ private:
     QPushButton *m_copyButton = nullptr;
     QToolButton *m_sideBySideButton = nullptr;
     QToolButton *m_unifiedButton = nullptr;
+    QToolButton *m_suggestionsButton = nullptr;
+    QStackedWidget *m_views = nullptr;           ///< page 0: the diff, page 1: the suggestions
+    SuggestionPanel *m_suggestions = nullptr;
     QCheckBox *m_onlyChangedCheck = nullptr;
     QLabel *m_summaryLabel = nullptr;
     QLabel *m_bannerLabel = nullptr;

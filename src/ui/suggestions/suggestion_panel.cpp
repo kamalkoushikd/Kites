@@ -12,6 +12,8 @@
 
 #include <QAction>
 #include <QEvent>
+#include <QHideEvent>
+#include <QShowEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -49,57 +51,41 @@ QToolBar *mainToolbar(QMainWindow *window)
 
 } // namespace
 
-SuggestionPanel *SuggestionPanel::install(QMainWindow *window, EditorTab *editorTab, ProcessorManager *processorManager)
+void SuggestionPanel::attachRunButton(QMainWindow *window)
 {
-    auto *panel = new SuggestionPanel(window, editorTab, processorManager);
-    window->addDockWidget(Qt::BottomDockWidgetArea, panel);
-    panel->hide();
-
     QToolBar *toolbar = mainToolbar(window);
-    auto *analyzeAction = new QAction(tr("Analyze"), window);
-    analyzeAction->setToolTip(tr("Look for instructions that can be moved to remove pipeline stalls"));
-    if (toolbar)
+    if (!toolbar)
     {
-        toolbar->addAction(analyzeAction);
-        // The Run button: if there are suggestions we first show a banner (see eventFilter).
-        for (QAction *action : toolbar->actions())
+        return;
+    }
+    // The Run button: if there are suggestions we first show a banner (see eventFilter).
+    for (QAction *action : toolbar->actions())
+    {
+        if (action->text() == QLatin1String("Run"))
         {
-            if (action->text() == QLatin1String("Run"))
+            m_runAction = action;
+            m_runButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(action));
+            if (m_runButton)
             {
-                panel->m_runAction = action;
-                panel->m_runButton = qobject_cast<QToolButton *>(toolbar->widgetForAction(action));
-                if (panel->m_runButton)
-                {
-                    panel->m_runButton->installEventFilter(panel);
-                }
+                m_runButton->installEventFilter(this);
             }
         }
     }
-    connect(analyzeAction, &QAction::triggered, panel, &SuggestionPanel::analyzeAndShow);
-    if (auto *mainWindow = qobject_cast<MainWindow *>(window))
-    {
-        connect(mainWindow, &MainWindow::processorChangedSignal, panel,
-                [panel]()
-                {
-                    if (panel->m_analyzed && panel->isVisible())
-                    {
-                        panel->analyze();
-                    }
-                });
-    }
-    return panel;
 }
 
-SuggestionPanel::SuggestionPanel(QMainWindow *window, EditorTab *editorTab, ProcessorManager *processorManager)
-    : QDockWidget(tr("Suggestions"), window), m_window(window), m_editorTab(editorTab),
-      m_processorManager(processorManager)
+void SuggestionPanel::setOptions(const scheduler::Options &options)
+{
+    m_options = options;
+}
+
+SuggestionPanel::SuggestionPanel(QWidget *parent, EditorTab *editorTab, ProcessorManager *processorManager)
+    : QWidget(parent), m_editorTab(editorTab), m_processorManager(processorManager)
 {
     setObjectName(QStringLiteral("suggestionPanel"));
-    setAllowedAreas(Qt::BottomDockWidgetArea | Qt::LeftDockWidgetArea);
 
-    auto *content = new QWidget(this);
+    QWidget *content = this;
     auto *layout = new QVBoxLayout(content);
-    layout->setContentsMargins(10, 6, 10, 8);
+    layout->setContentsMargins(2, 0, 2, 0);
     layout->setSpacing(6);
 
     // header: which suggestion, and navigation
@@ -159,7 +145,6 @@ SuggestionPanel::SuggestionPanel(QMainWindow *window, EditorTab *editorTab, Proc
     footer->addSpacing(8);
     footer->addWidget(m_noteLabel, 1);
     layout->addLayout(footer);
-    setWidget(content);
 
     m_reanalyzeTimer = new QTimer(this);
     m_reanalyzeTimer->setSingleShot(true);
@@ -194,7 +179,7 @@ SuggestionPanel::SuggestionPanel(QMainWindow *window, EditorTab *editorTab, Proc
             [this]()
             {
                 hideRunBanner();
-                analyzeAndShow();
+                emit reviewRequested(); // the Reorder panel opens on this view
             });
     connect(runAnywayButton, &QPushButton::clicked, this,
             [this]()
@@ -223,7 +208,8 @@ bool SuggestionPanel::pipelineProcessor() const
     return m_processorManager && m_processorManager->getProcessorType() != ProcessorType::RVSS;
 }
 
-scheduler::Options SuggestionPanel::currentOptions() const
+// What Run will use: the selected processor (the Run banner checks this one).
+scheduler::Options SuggestionPanel::processorOptions() const
 {
     scheduler::Options options;
     switch (m_processorManager ? m_processorManager->getProcessorType() : ProcessorType::RVSS)
@@ -244,16 +230,23 @@ scheduler::Options SuggestionPanel::currentOptions() const
     return options;
 }
 
-void SuggestionPanel::analyzeAndShow()
+// The squiggles belong to this view: they are shown while it is open.
+void SuggestionPanel::showEvent(QShowEvent *event)
 {
-    const bool wasHidden = isHidden();
-    show();
-    raise();
-    if (wasHidden && !isFloating() && m_window)
+    QWidget::showEvent(event);
+    if (m_analyzed)
     {
-        m_window->resizeDocks({this}, {m_window->height() * 9 / 20}, Qt::Vertical); // room for the timeline
+        updateSquiggles();
     }
-    analyze();
+}
+
+void SuggestionPanel::hideEvent(QHideEvent *event)
+{
+    QWidget::hideEvent(event);
+    if (m_squiggles)
+    {
+        m_squiggles->clearLines();
+    }
 }
 
 void SuggestionPanel::analyze()
@@ -265,10 +258,13 @@ void SuggestionPanel::analyze()
         return;
     }
     m_analyzedText = edit->toPlainText();
-    m_result = scheduler::analyze(m_analyzedText.toStdString(), currentOptions());
+    m_result = scheduler::analyze(m_analyzedText.toStdString(), m_options);
     m_analyzed = true;
     showSuggestion(std::min(m_current, std::max(0, static_cast<int>(visibleSuggestions().size()) - 1)));
-    updateSquiggles();
+    if (isVisible())
+    {
+        updateSquiggles();
+    }
 }
 
 std::vector<int> SuggestionPanel::visibleSuggestions() const
@@ -398,7 +394,7 @@ void SuggestionPanel::apply()
     }
     if (edit->isReadOnly())
     {
-        QMessageBox::information(this, windowTitle(), tr("Stop the running program before changing the code."));
+        QMessageBox::information(this, tr("Suggestions"), tr("Stop the running program before changing the code."));
         return;
     }
     if (edit->toPlainText() != m_analyzedText)
@@ -509,6 +505,10 @@ void SuggestionPanel::onTextChanged()
 
 void SuggestionPanel::guardRun()
 {
+    // Run uses the selected processor, so the banner counts for that pipeline
+    const int window = m_options.window;
+    m_options = processorOptions();
+    m_options.window = window;
     analyze();
     int saved = 0;
     const std::vector<int> visible = visibleSuggestions();
@@ -582,7 +582,9 @@ bool SuggestionPanel::eventFilter(QObject *watched, QEvent *event)
         if (mouse->button() == Qt::LeftButton && m_runButton->rect().contains(mouse->position().toPoint()) && edit &&
             !edit->isReadOnly())
         {
-            const scheduler::Result result = scheduler::analyze(edit->toPlainText().toStdString(), currentOptions());
+            scheduler::Options options = processorOptions();
+            options.window = m_options.window;
+            const scheduler::Result result = scheduler::analyze(edit->toPlainText().toStdString(), options);
             if (!result.suggestions.empty())
             {
                 m_runButton->setDown(false); // we take the click: release the button
@@ -591,7 +593,7 @@ bool SuggestionPanel::eventFilter(QObject *watched, QEvent *event)
             }
         }
     }
-    return QDockWidget::eventFilter(watched, event);
+    return QWidget::eventFilter(watched, event);
 }
 
 } // namespace Kites

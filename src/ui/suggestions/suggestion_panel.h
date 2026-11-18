@@ -2,7 +2,7 @@
 
 #include "scheduler/scheduler.h"
 
-#include <QDockWidget>
+#include <QWidget>
 #include <QPointer>
 #include <QSet>
 #include <QString>
@@ -24,36 +24,46 @@ class PipelineTimeline;
 class ProcessorManager;
 
 /**
- * @brief "Style C" suggestions: Analyze button, squiggles in the editor, and a panel
- *        with one suggestion at a time (Moved / Why / Effect + pipeline timeline).
+ * @brief "Style C" suggestions: squiggles in the editor, and a view with one
+ *        suggestion at a time (Moved / Why / Effect + pipeline timeline).
+ *
+ * It is the "Suggestions" view of the Reorder panel (ReorderDock), next to
+ * "Side by side" and "Unified".
  *
  * Flow:
- *   Analyze (toolbar)  -> scheduler::analyze() on the editor text
- *                      -> waiting lines get a squiggle (hover = the three lines)
- *                      -> the panel shows suggestion 1 of N with its block's timeline
- *   Apply              -> rewrites only that block, as one undo step, then analyzes again
- *   Dismiss            -> hides that suggestion until the code changes
- *   Run (toolbar)      -> if there are suggestions, a banner offers "Review suggestions" or "Run anyway"
+ *   Analyze (Reorder panel) -> scheduler::analyze() on the editor text
+ *                           -> waiting lines get a squiggle (hover = the three lines)
+ *                           -> the view shows suggestion 1 of N with its block's timeline
+ *   Apply                   -> rewrites only that block, as one undo step, then analyzes again
+ *   Dismiss                 -> hides that suggestion until the code changes
+ *   Run (toolbar)           -> if there are suggestions, a banner offers "Review suggestions" or "Run anyway"
  */
-class SuggestionPanel : public QDockWidget
+class SuggestionPanel : public QWidget
 {
     Q_OBJECT
 public:
-    /// Creates the panel (hidden), the "Analyze" toolbar action and the Run banner.
-    static SuggestionPanel *install(QMainWindow *window, EditorTab *editorTab, ProcessorManager *processorManager);
+    SuggestionPanel(QWidget *parent, EditorTab *editorTab, ProcessorManager *processorManager);
 
-    SuggestionPanel(QMainWindow *window, EditorTab *editorTab, ProcessorManager *processorManager);
+    /// Watches the toolbar's Run button, so pressing Run can show the banner first.
+    void attachRunButton(QMainWindow *window);
+    /// Pipeline and window size to analyze for (the Reorder panel's "Pipeline" and "Window").
+    void setOptions(const scheduler::Options &options);
+
+signals:
+    /// "Review suggestions" was clicked in the Run banner.
+    void reviewRequested();
 
 public slots:
-    void analyzeAndShow();
     void analyze();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 
 private:
     QPlainTextEdit *editor() const;
-    scheduler::Options currentOptions() const;
+    scheduler::Options processorOptions() const;
     bool pipelineProcessor() const;
     std::vector<int> visibleSuggestions() const;
     QString suggestionKey(const scheduler::Suggestion &suggestion) const;
@@ -67,7 +77,6 @@ private:
     void hideRunBanner();
     void placeRunBanner();
 
-    QMainWindow *m_window = nullptr;
     EditorTab *m_editorTab = nullptr;
     ProcessorManager *m_processorManager = nullptr;
 
@@ -94,6 +103,7 @@ private:
     QLabel *m_runBannerLabel = nullptr;
     bool m_runAnyway = false; ///< the next Run click goes through without the banner
 
+    scheduler::Options m_options; ///< set by the Reorder panel
     scheduler::Result m_result;
     bool m_analyzed = false;
     QString m_analyzedText;

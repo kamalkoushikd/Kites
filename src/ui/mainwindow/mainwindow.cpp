@@ -13,7 +13,6 @@
 #include "ui/processor_tab/processortab.h"
 #include "ui/profiler_tab/profilertab.h"
 #include "ui/reorder_panel/reorder_dock.h"
-#include "ui/suggestions/suggestion_panel.h"
 #include "ui/theme/icon_manager.h"
 #include "ui_mainwindow.h"
 #include "utils/utils.h"
@@ -119,10 +118,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(&ThemeManager::getInstance(), &ThemeManager::themeChangedSignal,
             this, &MainWindow::themeChangedSlot);
 
-    // Instruction reordering suggestions: a "Reorder" toolbar action and a dock (src/ui/reorder_panel)
+    // Instruction reordering: a "Reorder" toolbar action and a dock with a diff view and a
+    // suggestions view (src/ui/reorder_panel, src/ui/suggestions)
     ReorderDock::install(this, dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]), m_processorManager);
-    // Style C suggestions: an "Analyze" toolbar action, editor squiggles and a suggestion panel (src/ui/suggestions)
-    SuggestionPanel::install(this, dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]), m_processorManager);
 }
 
 void MainWindow::setUpStatusBar()

@@ -1,7 +1,7 @@
 # Known issues found while testing the suggestions feature
 
 These were found while testing the instruction-reordering features (the
-**Reorder** panel and the **Analyze** suggestions). They are not caused by
+**Reorder** panel with its diff and **Suggestions** views). They are not caused by
 those features and were **not** fixed, so that this branch only changes what
 belongs to the new features. Screenshots were taken on a virtual screen
 (Qt `offscreen` platform) with the Kites Dark and Kites Light themes.
@@ -15,7 +15,7 @@ belongs to the new features. Screenshots were taken on a virtual screen
 | Processor tab | The box above the diagram shows only the text **"CI"** before a program runs. |
 | Memory tab | Below address `0x0` the table shows rows filled with **"-"** (rows that do not belong to any address). |
 | Cache tab | The statistics fields (Size in Bits, Hits, Misses, Hit rate, Write backs) are empty boxes before a run instead of showing 0. |
-| Main toolbar | `MainWindow::runFinishedSlot()` and `themeChangedSlot()` find toolbar buttons by their **text** (`"Run"`, `"Stop"`, ...). Any other toolbar action with one of those texts would be changed by mistake. (The new actions are called "Reorder" and "Analyze", so they are not affected.) |
+| Main toolbar | `MainWindow::runFinishedSlot()` and `themeChangedSlot()` find toolbar buttons by their **text** (`"Run"`, `"Stop"`, ...). Any other toolbar action with one of those texts would be changed by mistake. (The new action is called "Reorder", so it is not affected.) |
 
 ## Simulator and tools
 
