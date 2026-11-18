@@ -81,6 +81,19 @@ target_link_libraries(kites_core
     Qt::Concurrent
 )
 
+# Instruction reordering: the list scheduler (plain C, unmodified copy) used by src/reorder
+file(GLOB LIST_SCHEDULER_SRC_FILES CONFIGURE_DEPENDS "${EXTERNAL_DIR}/list_scheduler/src/*.c")
+add_library(kites_list_scheduler STATIC ${LIST_SCHEDULER_SRC_FILES})
+set_target_properties(kites_list_scheduler PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+    AUTOMOC OFF
+    AUTOUIC OFF
+    AUTORCC OFF
+)
+target_include_directories(kites_list_scheduler PUBLIC ${EXTERNAL_DIR})
+target_link_libraries(kites_core kites_list_scheduler)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(kites_core PRIVATE 
         -Wall 
@@ -124,7 +137,7 @@ install(TARGETS ${PROJECT_NAME}
 )
 
 # Command-line executable (no GUI/QApplication dependency at runtime).
-add_executable(kites_cli cli/main.cpp cli/repl.cpp)
+add_executable(kites_cli cli/main.cpp cli/repl.cpp cli/compare_mode.cpp)
 set_target_properties(kites_cli PROPERTIES OUTPUT_NAME "kites-cli")
 target_link_libraries(kites_cli PRIVATE kites_core)
 target_compile_definitions(kites_cli PRIVATE DISABLE_GUI)

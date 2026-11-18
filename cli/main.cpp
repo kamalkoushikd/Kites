@@ -2,6 +2,7 @@
  * @file main.cpp
  * @brief Entry point for the Kites command-line interface.
  */
+#include "compare_mode.h"
 #include "assembler/assembler.h"
 #include "command_handler/command_handler.h"
 #include "common/assembled_program.h"
@@ -48,6 +49,10 @@ const std::unordered_map<std::string, Kites::ProcessorType> processorTypes = {
 
 int main(int argc, char *argv[])
 {
+    // `kites-cli compare FILE ...`: check the scheduler's reordered program (cli/compare_mode.cpp)
+    if (argc >= 2 && std::string(argv[1]) == "compare")
+        return Kites::runCompareMode(argc, argv);
+
     QCoreApplication app(argc, argv);
 
     Kites::setupVmStateDirectory();
