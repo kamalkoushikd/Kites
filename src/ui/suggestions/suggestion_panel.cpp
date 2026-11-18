@@ -120,14 +120,20 @@ SuggestionPanel::SuggestionPanel(QWidget *parent, EditorTab *editorTab, Processo
     m_whyLabel->setWordWrap(true);
     m_effectLabel = new QLabel(m_details);
     m_effectLabel->setTextFormat(Qt::RichText);
-    details->addWidget(m_movedLabel);
-    details->addWidget(m_codeLabel, 0, Qt::AlignLeft);
+    // one line: Moved (line n) [code]   Effect: ...; the next line: Why
+    auto *movedRow = new QHBoxLayout();
+    movedRow->setSpacing(8);
+    movedRow->addWidget(m_movedLabel);
+    movedRow->addWidget(m_codeLabel);
+    movedRow->addSpacing(16);
+    movedRow->addWidget(m_effectLabel);
+    movedRow->addStretch(1);
+    details->addLayout(movedRow);
     details->addWidget(m_whyLabel);
-    details->addWidget(m_effectLabel);
     m_timeline = new PipelineTimeline(m_details);
     auto *scroll = new QScrollArea(m_details);
     scroll->setWidget(m_timeline);
-    scroll->setWidgetResizable(false);
+    scroll->setWidgetResizable(true); // the timeline fills the space; it scrolls only when it does not fit
     scroll->setFrameShape(QFrame::NoFrame);
     details->addWidget(scroll, 1);
     layout->addWidget(m_details, 1);
@@ -327,7 +333,7 @@ void SuggestionPanel::showSuggestion(int index)
     m_movedLabel->setText(tr("<b>Moved</b> (line %1)").arg(s.movedLine));
     const ThemeManager &theme = ThemeManager::getInstance();
     m_codeLabel->setStyleSheet(QStringLiteral("QLabel { background-color: %1; color: %2; border: 1px solid %3; "
-                                              "border-radius: 3px; padding: 4px 10px; }")
+                                              "border-radius: 3px; padding: 1px 8px; }")
                                    .arg(theme.getEditorBackgroundColor().name(), theme.getEditorForegroundColor().name(),
                                         theme.getEditorMutedForegroundColor().name()));
     m_codeLabel->setText(QString::fromStdString(s.movedText));

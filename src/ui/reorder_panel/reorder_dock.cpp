@@ -155,7 +155,9 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     layout->addLayout(controls);
 
     // ---- second row: summary and view options ------------------------------------
-    auto *status = new QHBoxLayout();
+    m_statusRow = new QWidget(content);
+    auto *status = new QHBoxLayout(m_statusRow);
+    status->setContentsMargins(0, 0, 0, 0);
     status->setSpacing(8);
     m_summaryLabel = new QLabel(content);
     m_summaryLabel->setTextFormat(Qt::RichText);
@@ -185,10 +187,12 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_suggestionsButton->setStyleSheet(toggleStyle);
     status->addWidget(m_summaryLabel, 1);
     status->addWidget(m_onlyChangedCheck);
-    status->addWidget(m_sideBySideButton);
-    status->addWidget(m_unifiedButton);
-    status->addWidget(m_suggestionsButton);
-    layout->addLayout(status);
+    layout->addWidget(m_statusRow);
+    // the view choice sits in the first row, so it stays in the same place in every view
+    controls->insertWidget(controls->indexOf(m_copyButton), m_sideBySideButton);
+    controls->insertWidget(controls->indexOf(m_copyButton), m_unifiedButton);
+    controls->insertWidget(controls->indexOf(m_copyButton), m_suggestionsButton);
+    controls->insertSpacing(controls->indexOf(m_copyButton), 12);
 
     m_bannerLabel = new QLabel(content);
     m_bannerLabel->setWordWrap(true);
@@ -476,7 +480,7 @@ void ReorderDock::updateViewMode()
 {
     const bool suggestions = suggestionsView();
     m_views->setCurrentIndex(suggestions ? 1 : 0);
-    m_onlyChangedCheck->setVisible(!suggestions);
+    m_statusRow->setVisible(!suggestions); // summary and "Only changed blocks" belong to the diff
     m_copyButton->setVisible(!suggestions);
     m_revertButton->setVisible(!suggestions);
     m_applyButton->setVisible(!suggestions);
@@ -868,9 +872,7 @@ void ReorderDock::updateState()
     }
     if (suggestionsView())
     {
-        // the summary and messages describe the diff; the Suggestions view shows its own
-        m_summaryLabel->clear();
-        m_bannerLabel->hide();
+        m_bannerLabel->hide(); // its messages describe the diff; the Suggestions view shows its own
     }
 }
 

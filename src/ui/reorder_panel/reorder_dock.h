@@ -93,6 +93,7 @@ private:
     QStackedWidget *m_views = nullptr;           ///< page 0: the diff, page 1: the suggestions
     SuggestionPanel *m_suggestions = nullptr;
     QCheckBox *m_onlyChangedCheck = nullptr;
+    QWidget *m_statusRow = nullptr; ///< second row: summary and "Only changed blocks" (diff views only)
     QLabel *m_summaryLabel = nullptr;
     QLabel *m_bannerLabel = nullptr;
     ReorderDiffView *m_diffView = nullptr;

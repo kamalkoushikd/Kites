@@ -16,6 +16,9 @@ namespace Kites
  * hazard unit stalls it, red = a NOP is needed because there is no hazard unit).
  * In the "after" timeline the moved instruction's row is highlighted and
  * labelled "fills stall".
+ *
+ * The widget fills the width it is given: "Before" and "After" are drawn side by
+ * side when both fit, otherwise one below the other.
  */
 class PipelineTimeline : public QWidget
 {
@@ -27,15 +30,22 @@ public:
                   bool hazardUnit, int highlightLine);
     void clear();
     QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
-    /// Draws one timeline (title + rows) starting at y; returns the y below it.
-    int paintTimeline(QPainter &painter, int y, const QString &title, const std::vector<scheduler::TimelineRow> &rows,
-                      bool after);
+    /// Draws one timeline (title + rows) at (x, y) in a column of the given width; returns the y below it.
+    int paintTimeline(QPainter &painter, int x, int y, int width, const QString &title,
+                      const std::vector<scheduler::TimelineRow> &rows, bool after);
     int cycles() const;
+    int columnWidth(bool after) const; ///< width one timeline needs (After: with room for "fills stall")
+    int sideBySideHeight() const;  ///< height with Before | After next to each other
+    int stackedHeight() const;     ///< height with Before above After
+    bool sideBySide() const;       ///< true if both timelines fit next to each other
+    void updateMinimumHeight();
 
     std::vector<scheduler::TimelineRow> m_before;
     std::vector<scheduler::TimelineRow> m_after;
@@ -44,6 +54,7 @@ private:
     int m_labelWidth = 260;
     int m_cellWidth = 34;
     int m_rowHeight = 20;
+    int m_noteWidth = 100; ///< room for "← fills stall" after a row
 };
 
 } // namespace Kites
