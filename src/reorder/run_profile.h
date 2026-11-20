@@ -32,6 +32,8 @@
 
 namespace Kites
 {
+class ProcessorBase;
+
 namespace reorder
 {
 
@@ -75,11 +77,17 @@ class ProfiledRun
     /// Runs up to `cycles` more cycles. Returns false when the run is over.
     bool step(unsigned cycles);
     const RunProfile &profile() const;
+    /// The processor after the run (registers, memory), or nullptr if the program did not assemble.
+    const ProcessorBase *processor() const;
 
   private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+/// true for an instruction that jumps to itself (jal x0, 0 / beq x0, x0, 0 ...): a program's
+/// "halt" loop. Also used for the single-cycle reference in kites-cli compare.
+bool jumpsToItself(uint32_t instruction);
 
 /// The whole run at once (kites-cli).
 RunProfile profileRun(const std::string &source, PipelineVariant variant, unsigned maxCycles = 5000000);

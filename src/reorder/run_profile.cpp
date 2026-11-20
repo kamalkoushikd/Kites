@@ -196,7 +196,6 @@ struct ProfiledRun::Impl
     std::unique_ptr<Probe> probe;
     unsigned maxCycles = 0;
     bool done = false;
-    Slot lastWritten; ///< the previous instruction that reached WB
 
     int lineOf(uint64_t pc) const
     {
@@ -304,16 +303,22 @@ bool ProfiledRun::step(unsigned cycles)
                 }
             }
 
-            // the instruction that reached WB this cycle
+            // the instruction that finished MEM this cycle (its WB is the next cycle's first step)
             ++profile.cycles;
             const Slot written = probe.memWb();
             if (written.valid())
             {
-                // a lab program without an exit call: it would run forever from here
-                const bool returnedToStart = written.pc == 0 && m.lastWritten.valid() &&
-                                             (m.lastWritten.instruction & 0x7f) == 0x67; // jalr
-                const bool jumpsToItself = m.lastWritten.valid() && written.pc == m.lastWritten.pc;
-                if (returnedToStart || jumpsToItself)
+                ++profile.instructions;
+                ++profile.lines[m.lineOf(written.pc)].executed;
+                if (written.instruction == kNop)
+                {
+                    ++profile.nops;
+                }
+                // A lab program without an exit call would run forever from here. Stop while the
+                // instructions after it have not reached MEM yet, so the state is the program's own.
+                const bool returnedToStart =
+                    (written.instruction & 0x7f) == 0x67 && (probe.ifId().pc == 0 || probe.idEx().pc == 0); // jalr
+                if (returnedToStart || jumpsToItself(written.instruction))
                 {
                     profile.finished = true;
                     profile.endReason = returnedToStart ? "returned to address 0 (ra = 0)"
@@ -321,13 +326,6 @@ bool ProfiledRun::step(unsigned cycles)
                                                               " jumps to itself";
                     m.finish();
                     return false;
-                }
-                m.lastWritten = written;
-                ++profile.instructions;
-                ++profile.lines[m.lineOf(written.pc)].executed;
-                if (written.instruction == kNop)
-                {
-                    ++profile.nops;
                 }
             }
         }
@@ -345,6 +343,28 @@ bool ProfiledRun::step(unsigned cycles)
 const RunProfile &ProfiledRun::profile() const
 {
     return m_impl->profile;
+}
+
+const ProcessorBase *ProfiledRun::processor() const
+{
+    return m_impl->probe ? &m_impl->probe->vm() : nullptr;
+}
+
+bool jumpsToItself(uint32_t instruction)
+{
+    const uint32_t opcode = instruction & 0x7f;
+    if (opcode == 0x6f) // jal with offset 0
+    {
+        return (instruction >> 12) == 0;
+    }
+    if (opcode == 0x63) // beq / bge / bgeu rs, rs with offset 0: always taken
+    {
+        const uint32_t funct3 = (instruction >> 12) & 7;
+        const bool sameRegisters = ((instruction >> 15) & 31) == ((instruction >> 20) & 31);
+        const bool offsetZero = (instruction >> 25) == 0 && ((instruction >> 7) & 31) == 0;
+        return offsetZero && sameRegisters && (funct3 == 0 || funct3 == 5 || funct3 == 7);
+    }
+    return false;
 }
 
 RunProfile profileRun(const std::string &source, PipelineVariant variant, unsigned maxCycles)

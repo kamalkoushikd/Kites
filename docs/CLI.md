@@ -193,6 +193,12 @@ stall cycles and the stall cycles it caused. Stall cycles where no instruction a
 writes a register the waiting line reads are listed separately (Kites' hazard unit
 reads immediate bits as `rs2`, see `docs/KNOWN_UI_ISSUES.md`).
 
+Programs without an exit call stop where they would loop forever: a `jalr` back to address
+0 (`ra` is still 0) or an instruction that jumps to itself (`exit: j exit`). `ra` may end
+with a different code address when NOPs were added (the return addresses move); that
+counts as the same result. Runs are stepped one cycle at a time without Undo history, so a
+run stays small in memory.
+
 The exit code is 0 when every reordered program matches the reference. "original on
 pipe" is for information: a program without NOPs is not meant to be correct on a
 pipeline without a hazard unit. `--write-reordered p` saves the rewritten programs as

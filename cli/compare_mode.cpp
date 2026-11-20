@@ -1,10 +1,6 @@
 #include "compare_mode.h"
 
 #include "assembler/assembler.h"
-#include "processor/rv5s/rv5s_processor_h_f.h"
-#include "processor/rv5s/rv5s_processor_h_nf.h"
-#include "processor/rv5s/rv5s_processor_nh_f.h"
-#include "processor/rv5s/rv5s_processor_nh_nf.h"
 #include "processor/rvss/rvss_processor.h"
 #include "reorder/run_profile.h"
 #include "reorder/suggestions.h"
@@ -12,14 +8,12 @@
 
 #include <QApplication>
 #include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
-#include <thread>
+#include <streambuf>
 
 namespace Kites
 {
@@ -40,75 +34,143 @@ const Pipeline kPipelines[] = {
     {"rv5-nh-nf", false, false},
 };
 
-/// What a run leaves behind: the state we compare, and how long it took.
+constexpr unsigned kMaxCycles = 5000000; ///< a run that takes longer is stopped (no exit call, endless loop)
+
+/// What a run leaves behind: the state we compare, and the measured profile (pipelines).
 struct RunResult
 {
     bool ok = false;
     std::string error;
     std::vector<uint64_t> state; ///< x1..x31, f0..f31, then the memory bytes
-    unsigned cycles = 0;
-    unsigned stalls = 0;
+    uint64_t codeBytes = 0;      ///< size of the program's code
+    reorder::RunProfile profile; ///< 5-stage pipelines only
 };
 
-std::unique_ptr<ProcessorBase> makeProcessor(const std::string &name)
+/// A return address: a code address, so it moves when NOPs are added in front of it.
+bool isCodeAddress(uint64_t value, uint64_t codeBytes)
 {
-    if (name == "rv5-h-f")
-        return std::make_unique<RV5StageProcessorHF>();
-    if (name == "rv5-h-nf")
-        return std::make_unique<RV5StageProcessorHNF>();
-    if (name == "rv5-nh-f")
-        return std::make_unique<RV5StageProcessorNHF>();
-    if (name == "rv5-nh-nf")
-        return std::make_unique<RV5StageProcessorNHNF>();
-    return std::make_unique<RVSSProcessor>();
+    return value % 4 == 0 && value <= codeBytes;
 }
+
+/// Same registers and memory. ra (x1) may differ when both values are code addresses: the
+/// reordered program can have more lines (added NOPs), so its return addresses move.
+bool sameResult(const RunResult &expected, const RunResult &actual)
+{
+    if (!actual.ok || expected.state.size() != actual.state.size())
+        return false;
+    for (size_t i = 0; i < expected.state.size(); ++i)
+    {
+        if (expected.state[i] == actual.state[i])
+            continue;
+        const bool returnAddress = i == 0 && isCodeAddress(expected.state[i], expected.codeBytes) &&
+                                   isCodeAddress(actual.state[i], actual.codeBytes);
+        if (!returnAddress)
+            return false;
+    }
+    return true;
+}
+
+/// Kites prints a line per cycle; throw it away instead of keeping it in memory.
+class DiscardBuffer : public std::streambuf
+{
+  protected:
+    int overflow(int c) override { return c; }
+};
+
+/// Hides std::cout while it exists.
+class QuietOutput
+{
+  public:
+    QuietOutput() : m_old(std::cout.rdbuf(&m_discard)) {}
+    ~QuietOutput() { std::cout.rdbuf(m_old); }
+
+  private:
+    DiscardBuffer m_discard;
+    std::streambuf *m_old;
+};
+
+reorder::PipelineVariant variantOf(const std::string &name)
+{
+    if (name == "rv5-h-nf")
+        return reorder::PipelineVariant::HazardUnitNoForwarding;
+    if (name == "rv5-nh-f")
+        return reorder::PipelineVariant::NoHazardUnitForwarding;
+    if (name == "rv5-nh-nf")
+        return reorder::PipelineVariant::NoHazardUnitNoForwarding;
+    return reorder::PipelineVariant::HazardUnitForwarding;
+}
+
+/// The single-cycle processor, stepped one instruction at a time with the same end rules as
+/// the measured pipeline runs (src/reorder/run_profile.h), and without keeping Undo history.
+class ReferenceProcessor : public RVSSProcessor
+{
+  public:
+    /// Runs to the end; returns "" or why it stopped early.
+    std::string runToEnd(const AssembledProgram &program)
+    {
+        ClearStop();
+        for (unsigned step = 0; step < kMaxCycles; ++step)
+        {
+            if (stop_requested_ || program_counter_ >= program_size_)
+                return "";
+            const uint64_t pc = program_counter_;
+            const uint32_t instruction = program.text_buffer[pc / 4];
+            Step();
+            while (!undo_stack_.empty())
+                undo_stack_.pop();
+            if (reorder::jumpsToItself(instruction) && program_counter_ == pc)
+                return "";
+            if ((instruction & 0x7f) == 0x67 && program_counter_ == 0) // jalr back to the start (ra = 0)
+                return "";
+        }
+        return "did not finish within " + std::to_string(kMaxCycles) + " instructions";
+    }
+};
 
 RunResult run(const std::string &source, const std::string &processor, uint64_t memStart, uint64_t memBytes)
 {
     RunResult result;
-    AssembledProgram program;
+    QuietOutput quiet;
+    const ProcessorBase *vm = nullptr;
+    std::unique_ptr<ReferenceProcessor> reference;
+    std::unique_ptr<reorder::ProfiledRun> pipeline;
     try
     {
-        std::istringstream stream(source);
-        program = assemble(stream);
+        if (processor == "rvss")
+        {
+            std::istringstream stream(source);
+            const AssembledProgram program = assemble(stream);
+            reference = std::make_unique<ReferenceProcessor>();
+            reference->step_delay_ = 0;
+            reference->LoadProgram(program);
+            result.error = reference->runToEnd(program);
+            vm = reference.get();
+        }
+        else
+        {
+            pipeline = std::make_unique<reorder::ProfiledRun>(source, variantOf(processor), kMaxCycles);
+            while (pipeline->step(100000))
+            {
+            }
+            result.profile = pipeline->profile();
+            result.error = result.profile.error;
+            if (result.error.empty() && !result.profile.finished)
+                result.error = "did not finish within " + std::to_string(kMaxCycles) + " cycles";
+            vm = pipeline->processor();
+        }
     }
     catch (const std::exception &e)
     {
         result.error = std::string("does not assemble: ") + e.what();
-        return result;
     }
-    std::unique_ptr<ProcessorBase> vm = makeProcessor(processor);
-    vm->step_delay_ = 0;
-    vm->LoadProgram(program);
-
-    // DebugRun prints every cycle: keep that out of our output. A watchdog stops endless loops.
-    std::atomic<bool> done{false};
-    std::thread watchdog(
-        [&]()
-        {
-            for (int i = 0; i < 200 && !done; ++i)
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            if (!done)
-                vm->RequestStop();
-        });
-    std::ostringstream sink;
-    std::streambuf *old = std::cout.rdbuf(sink.rdbuf());
-    try
+    if (!result.error.empty() || !vm)
     {
-        vm->DebugRun();
-    }
-    catch (const std::exception &e)
-    {
-        result.error = e.what(); // e.g. a wrong address computed by a program that is not correct on this pipeline
-    }
-    std::cout.rdbuf(old);
-    done = true;
-    watchdog.join();
-    if (!result.error.empty())
-    {
+        if (result.error.empty())
+            result.error = "does not assemble";
         return result;
     }
 
+    result.codeBytes = vm->program_.text_buffer.size() * 4;
     for (size_t r = 1; r < 32; ++r)
         result.state.push_back(vm->registers_.ReadGpr(r));
     for (size_t r = 0; r < 32; ++r)
@@ -121,9 +183,7 @@ RunResult run(const std::string &source, const std::string &processor, uint64_t 
         result.state.push_back(value);
     }
     for (uint64_t a = 0; a < memBytes; ++a)
-        result.state.push_back(vm->memory_controller_.peekByte(memStart + a));
-    result.cycles = vm->cycle_s_;
-    result.stalls = vm->stall_cycles_;
+        result.state.push_back(const_cast<ProcessorBase *>(vm)->memory_controller_.peekByte(memStart + a));
     result.ok = true;
     return result;
 }
@@ -151,21 +211,6 @@ std::string differences(const RunResult &expected, const RunResult &actual)
         ++shown;
     }
     return out.str();
-}
-
-/// Measured stalls (hazard unit) or executed NOPs (no hazard unit) of one run, Kites' debug output hidden.
-reorder::RunProfile measure(const std::string &source, const Pipeline &pipeline)
-{
-    using reorder::PipelineVariant;
-    const PipelineVariant variant =
-        pipeline.hazardUnit ? (pipeline.forwarding ? PipelineVariant::HazardUnitForwarding : PipelineVariant::HazardUnitNoForwarding)
-                            : (pipeline.forwarding ? PipelineVariant::NoHazardUnitForwarding
-                                                   : PipelineVariant::NoHazardUnitNoForwarding);
-    std::ostringstream sink;
-    std::streambuf *old = std::cout.rdbuf(sink.rdbuf());
-    reorder::RunProfile profile = reorder::profileRun(source, variant);
-    std::cout.rdbuf(old);
-    return profile;
 }
 
 /// Lines with measured stalls, most first: "line  ran  stalls  caused".
@@ -278,9 +323,9 @@ int runCompareMode(int argc, char *argv[])
         const RunResult before = run(original, pipeline.name, memStart, memBytes);
         const RunResult afterSingle = run(reordered, "rvss", memStart, memBytes);
         const RunResult after = run(reordered, pipeline.name, memStart, memBytes);
-        const bool singleMatch = afterSingle.ok && afterSingle.state == reference.state;
-        const bool pipelineMatch = after.ok && after.state == reference.state;
-        const bool originalMatch = before.ok && before.state == reference.state;
+        const bool singleMatch = sameResult(reference, afterSingle);
+        const bool pipelineMatch = sameResult(reference, after);
+        const bool originalMatch = sameResult(reference, before);
         allMatch = allMatch && singleMatch && pipelineMatch;
         std::ostringstream stalls;
         stalls << analysis.stallsBefore << " -> " << analysis.stallsAfter;
@@ -288,8 +333,8 @@ int runCompareMode(int argc, char *argv[])
         // "original on pipe" is informational: a plain program without NOPs is not meant to be
         // correct on a pipeline without a hazard unit.
         // measured: stall cycles with a hazard unit, executed NOPs without one
-        const reorder::RunProfile measuredBefore = measure(original, pipeline);
-        const reorder::RunProfile measuredAfter = measure(reordered, pipeline);
+        const reorder::RunProfile &measuredBefore = before.profile;
+        const reorder::RunProfile &measuredAfter = after.profile;
         auto measured = [&](const reorder::RunProfile &profile) {
             return profile.ok ? std::to_string(pipeline.hazardUnit ? profile.stalls : profile.nops) : std::string("-");
         };
