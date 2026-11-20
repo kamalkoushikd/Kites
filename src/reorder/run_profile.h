@@ -15,6 +15,10 @@
  *                  in the pipeline that writes a register it reads
  *   NOPs         = nop instructions that reached WB (pipelines without a hazard unit
  *                  never stall: the program's NOPs take the place of the stalls)
+ *
+ * A run ends like a Kites run (exit ecall, end of the code), and also where a lab
+ * program without an exit call would run forever: a return (jalr) to address 0 (ra is
+ * still 0: the program would start again) or an instruction that jumps to itself.
  */
 #pragma once
 
@@ -44,6 +48,7 @@ struct RunProfile
     bool ok = false;
     std::string error;
     bool finished = false;     ///< false: stopped at the cycle limit
+    std::string endReason;     ///< how the run ended, e.g. "returned to address 0"
     unsigned cycles = 0;
     unsigned instructions = 0; ///< instructions that reached WB
     unsigned stalls = 0;       ///< stall cycles (hazard unit)

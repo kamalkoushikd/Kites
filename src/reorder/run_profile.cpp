@@ -196,6 +196,7 @@ struct ProfiledRun::Impl
     std::unique_ptr<Probe> probe;
     unsigned maxCycles = 0;
     bool done = false;
+    Slot lastWritten; ///< the previous instruction that reached WB
 
     int lineOf(uint64_t pc) const
     {
@@ -207,7 +208,6 @@ struct ProfiledRun::Impl
     {
         done = true;
         ProcessorBase &vm = probe->vm();
-        profile.cycles = vm.cycle_s_;
         for (size_t r = 1; r < 32; ++r)
         {
             profile.registers.push_back(vm.registers_.ReadGpr(r));
@@ -265,11 +265,13 @@ bool ProfiledRun::step(unsigned cycles)
             if (!probe.running())
             {
                 profile.finished = true;
+                profile.endReason = probe.vm().output_status_ == "ECALL_EXIT" ? "exit ecall" : "end of the code";
                 m.finish();
                 return false;
             }
-            if (probe.vm().cycle_s_ >= m.maxCycles)
+            if (profile.cycles >= m.maxCycles)
             {
+                profile.endReason = "cycle limit";
                 m.finish();
                 return false;
             }
@@ -303,9 +305,24 @@ bool ProfiledRun::step(unsigned cycles)
             }
 
             // the instruction that reached WB this cycle
+            ++profile.cycles;
             const Slot written = probe.memWb();
             if (written.valid())
             {
+                // a lab program without an exit call: it would run forever from here
+                const bool returnedToStart = written.pc == 0 && m.lastWritten.valid() &&
+                                             (m.lastWritten.instruction & 0x7f) == 0x67; // jalr
+                const bool jumpsToItself = m.lastWritten.valid() && written.pc == m.lastWritten.pc;
+                if (returnedToStart || jumpsToItself)
+                {
+                    profile.finished = true;
+                    profile.endReason = returnedToStart ? "returned to address 0 (ra = 0)"
+                                                        : "line " + std::to_string(m.lineOf(written.pc)) +
+                                                              " jumps to itself";
+                    m.finish();
+                    return false;
+                }
+                m.lastWritten = written;
                 ++profile.instructions;
                 ++profile.lines[m.lineOf(written.pc)].executed;
                 if (written.instruction == kNop)

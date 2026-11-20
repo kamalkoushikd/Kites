@@ -284,8 +284,7 @@ int runCompareMode(int argc, char *argv[])
         allMatch = allMatch && singleMatch && pipelineMatch;
         std::ostringstream stalls;
         stalls << analysis.stallsBefore << " -> " << analysis.stallsAfter;
-        std::ostringstream cycles;
-        cycles << (before.ok ? std::to_string(before.cycles) : std::string("-")) << " -> " << after.cycles;
+
         // "original on pipe" is informational: a plain program without NOPs is not meant to be
         // correct on a pipeline without a hazard unit.
         // measured: stall cycles with a hazard unit, executed NOPs without one
@@ -294,6 +293,10 @@ int runCompareMode(int argc, char *argv[])
         auto measured = [&](const reorder::RunProfile &profile) {
             return profile.ok ? std::to_string(pipeline.hazardUnit ? profile.stalls : profile.nops) : std::string("-");
         };
+        // cycles of the measured runs (they also end lab programs that have no exit call)
+        std::ostringstream cycles;
+        cycles << (measuredBefore.ok ? std::to_string(measuredBefore.cycles) : std::string("-")) << " -> "
+               << (measuredAfter.ok ? std::to_string(measuredAfter.cycles) : std::string("-"));
         const std::string kitesStalls = measured(measuredBefore) + " -> " + measured(measuredAfter) +
                                         (pipeline.hazardUnit ? "" : " nop");
         std::cout << std::left << std::setw(11) << pipeline.name << std::setw(16) << stalls.str() << std::setw(18)
@@ -304,6 +307,8 @@ int runCompareMode(int argc, char *argv[])
             std::cout << "    reordered on rvss: " << differences(reference, afterSingle) << "\n";
         if (!pipelineMatch)
             std::cout << "    reordered on " << pipeline.name << ": " << differences(reference, after) << "\n";
+        if (measuredBefore.endReason != measuredAfter.endReason || measuredBefore.endReason != "exit ecall")
+            std::cout << "    measured runs ended: " << measuredBefore.endReason << " / " << measuredAfter.endReason << "\n";
         if (showLines && pipeline.hazardUnit)
         {
             printLines("original", measuredBefore);

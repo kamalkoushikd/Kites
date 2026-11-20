@@ -179,6 +179,11 @@ void MeasuredView::showResults()
     }
     const bool hazardUnit = reorder::hasHazardUnit(m_result->options.variant);
     QString status = tr("Measured on %1.").arg(QString::fromStdString(reorder::variantDescription(m_result->options.variant)));
+    if (!m_before.endReason.empty())
+    {
+        status += tr(" Runs ended: %1 / %2.")
+                      .arg(QString::fromStdString(m_before.endReason), QString::fromStdString(m_after.endReason));
+    }
     if (m_before.ok && m_after.ok)
     {
         status += m_before.registers == m_after.registers ? tr(" Both end with the same registers.")
