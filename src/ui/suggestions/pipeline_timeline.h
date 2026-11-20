@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scheduler/scheduler.h"
+#include "reorder/suggestions.h"
 
 #include <QWidget>
 #include <vector>
@@ -26,7 +26,7 @@ class PipelineTimeline : public QWidget
 public:
     explicit PipelineTimeline(QWidget *parent = nullptr);
 
-    void setBlock(const std::vector<scheduler::TimelineRow> &before, const std::vector<scheduler::TimelineRow> &after,
+    void setBlock(const std::vector<suggestions::TimelineRow> &before, const std::vector<suggestions::TimelineRow> &after,
                   bool hazardUnit, int highlightLine);
     void clear();
     QSize sizeHint() const override;
@@ -39,7 +39,7 @@ protected:
 private:
     /// Draws one timeline (title + rows) at (x, y) in a column of the given width; returns the y below it.
     int paintTimeline(QPainter &painter, int x, int y, int width, const QString &title,
-                      const std::vector<scheduler::TimelineRow> &rows, bool after);
+                      const std::vector<suggestions::TimelineRow> &rows, bool after);
     int cycles() const;
     int columnWidth(bool after) const; ///< width one timeline needs (After: with room for "fills stall")
     int sideBySideHeight() const;  ///< height with Before | After next to each other
@@ -47,8 +47,8 @@ private:
     bool sideBySide() const;       ///< true if both timelines fit next to each other
     void updateMinimumHeight();
 
-    std::vector<scheduler::TimelineRow> m_before;
-    std::vector<scheduler::TimelineRow> m_after;
+    std::vector<suggestions::TimelineRow> m_before;
+    std::vector<suggestions::TimelineRow> m_after;
     bool m_hazardUnit = true;
     int m_highlightLine = -1; ///< line of the moved instruction
     int m_labelWidth = 260;

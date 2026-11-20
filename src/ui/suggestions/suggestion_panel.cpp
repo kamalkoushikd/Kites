@@ -73,7 +73,7 @@ void SuggestionPanel::attachRunButton(QMainWindow *window)
     }
 }
 
-void SuggestionPanel::setOptions(const scheduler::Options &options)
+void SuggestionPanel::setOptions(const suggestions::Options &options)
 {
     m_options = options;
 }
@@ -215,9 +215,9 @@ bool SuggestionPanel::pipelineProcessor() const
 }
 
 // What Run will use: the selected processor (the Run banner checks this one).
-scheduler::Options SuggestionPanel::processorOptions() const
+suggestions::Options SuggestionPanel::processorOptions() const
 {
-    scheduler::Options options;
+    suggestions::Options options;
     switch (m_processorManager ? m_processorManager->getProcessorType() : ProcessorType::RVSS)
     {
     case ProcessorType::RV5Stage_H_NF:
@@ -264,7 +264,7 @@ void SuggestionPanel::analyze()
         return;
     }
     m_analyzedText = edit->toPlainText();
-    m_result = scheduler::analyze(m_analyzedText.toStdString(), m_options);
+    m_result = suggestions::analyze(m_analyzedText.toStdString(), m_options);
     m_analyzed = true;
     showSuggestion(std::min(m_current, std::max(0, static_cast<int>(visibleSuggestions().size()) - 1)));
     if (isVisible())
@@ -286,14 +286,14 @@ std::vector<int> SuggestionPanel::visibleSuggestions() const
     return visible;
 }
 
-QString SuggestionPanel::suggestionKey(const scheduler::Suggestion &suggestion) const
+QString SuggestionPanel::suggestionKey(const suggestions::Suggestion &suggestion) const
 {
     return QString::fromStdString(suggestion.why);
 }
 
 void SuggestionPanel::showSuggestion(int index)
 {
-    const scheduler::Options options = m_result.options;
+    const suggestions::Options options = m_result.options;
     m_modeLabel->setText(m_analyzed ? tr("Pipeline: hazard unit %1, forwarding %2%3")
                                           .arg(options.hazardUnit ? tr("on") : tr("off"),
                                                options.forwarding ? tr("on") : tr("off"),
@@ -327,8 +327,8 @@ void SuggestionPanel::showSuggestion(int index)
     }
 
     m_current = std::clamp(index, 0, static_cast<int>(visible.size()) - 1);
-    const scheduler::Suggestion &s = m_result.suggestions[visible[m_current]];
-    const scheduler::BlockChange &block = m_result.blocks[s.block];
+    const suggestions::Suggestion &s = m_result.suggestions[visible[m_current]];
+    const suggestions::BlockChange &block = m_result.blocks[s.block];
     m_titleLabel->setText(tr("Suggestion %1 of %2").arg(m_current + 1).arg(visible.size()));
     m_movedLabel->setText(tr("<b>Moved</b> (line %1)").arg(s.movedLine));
     const ThemeManager &theme = ThemeManager::getInstance();
@@ -353,7 +353,9 @@ void SuggestionPanel::showSuggestion(int index)
         note += inBlock == 2 ? tr(", together with the other suggestion in this block")
                              : tr(", together with the other %1 suggestions in this block").arg(inBlock - 1);
     }
-    note += tr(". NOPs are written only where an instruction still waits, so the block also runs without a hazard unit.");
+    note += m_result.options.hazardUnit
+                ? tr(". The hazard unit adds the stalls that remain; no NOPs are written.")
+                : tr(". Your NOPs are kept only where an instruction still waits, and missing ones are added.");
     m_noteLabel->setText(note);
 
     // show the waiting line in the editor
@@ -377,7 +379,7 @@ void SuggestionPanel::updateSquiggles()
     QMap<int, QString> tooltips;
     for (int i : visibleSuggestions())
     {
-        const scheduler::Suggestion &s = m_result.suggestions[i];
+        const suggestions::Suggestion &s = m_result.suggestions[i];
         QString text = tr("Moved: %1\nWhy: %2\nEffect: %3")
                            .arg(QString::fromStdString(s.movedText), QString::fromStdString(s.why),
                                 QString::fromStdString(s.effect));
@@ -408,7 +410,7 @@ void SuggestionPanel::apply()
         analyze(); // the code changed since the analysis
         return;
     }
-    const scheduler::BlockChange block = m_result.blocks[m_result.suggestions[visible[m_current]].block];
+    const suggestions::BlockChange block = m_result.blocks[m_result.suggestions[visible[m_current]].block];
 
     // breakpoints: lines after the block shift; inside it they follow their line's text
     std::vector<uint64_t> breakpoints;
@@ -512,9 +514,10 @@ void SuggestionPanel::onTextChanged()
 void SuggestionPanel::guardRun()
 {
     // Run uses the selected processor, so the banner counts for that pipeline
-    const int window = m_options.window;
+    const suggestions::Options chosen = m_options;
     m_options = processorOptions();
-    m_options.window = window;
+    m_options.window = chosen.window;
+    m_options.slidingWindows = chosen.slidingWindows;
     analyze();
     int saved = 0;
     const std::vector<int> visible = visibleSuggestions();
@@ -588,9 +591,10 @@ bool SuggestionPanel::eventFilter(QObject *watched, QEvent *event)
         if (mouse->button() == Qt::LeftButton && m_runButton->rect().contains(mouse->position().toPoint()) && edit &&
             !edit->isReadOnly())
         {
-            scheduler::Options options = processorOptions();
+            suggestions::Options options = processorOptions();
             options.window = m_options.window;
-            const scheduler::Result result = scheduler::analyze(edit->toPlainText().toStdString(), options);
+            options.slidingWindows = m_options.slidingWindows;
+            const suggestions::Result result = suggestions::analyze(edit->toPlainText().toStdString(), options);
             if (!result.suggestions.empty())
             {
                 m_runButton->setDown(false); // we take the click: release the button

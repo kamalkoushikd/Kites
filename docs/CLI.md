@@ -162,24 +162,36 @@ depends on platform:
 ## Checking the instruction scheduler: `kites-cli compare`
 
 ```
-kites-cli compare <assembly-file> [--vm rv5-h-f|rv5-h-nf|rv5-nh-f|rv5-nh-nf|all] [--window N]
-                                  [--mem <hex_addr> <bytes>] [--write-reordered <prefix>]
+kites-cli compare <assembly-file> [--vm rv5-h-f|rv5-h-nf|rv5-nh-f|rv5-nh-nf|all] [--window N] [--fixed]
+                                  [--lines] [--mem <hex_addr> <bytes>] [--write-reordered <prefix>]
 ```
 
 Runs the original program on the single-cycle processor (the reference), then the
-program as the scheduler would rewrite it (`src/scheduler`, every suggestion applied,
-NOPs only where still needed) on the single-cycle processor and on each 5-stage
-pipeline. It compares all integer and FP registers and the memory range
-(default `0x10000000`, 256 bytes) and prints the stalls (model) and the cycles
-Kites measured before and after:
+program as the scheduler would rewrite it (`src/reorder`, the list scheduler of
+`external/list_scheduler`, NOPs only where still needed on pipelines without a hazard
+unit) on the single-cycle processor and on each 5-stage pipeline. It compares all
+integer and FP registers and the memory range (default `0x10000000`, 256 bytes) and
+prints, before and after reordering:
+
+- **stalls (model)**: the scheduler's static count (every instruction once);
+- **cycles (Kites)**: the cycles of the real run;
+- **stalls (Kites)**: the stall cycles of the real run (hazard unit), or the NOPs that ran
+  (no hazard unit), counted cycle by cycle (`src/reorder/run_profile.*`), so a stall in
+  a loop counts every time the loop runs.
 
 ```
-pipeline   stalls (model)  cycles (Kites)    original on pipe    reordered on rvss   reordered on pipeline
-rv5-h-f    8 -> 0          63 -> 55          same                same                same
-rv5-h-nf   49 -> 2         104 -> 58         same                same                same
+pipeline   stalls (model)  cycles (Kites)    stalls (Kites)    original on pipe    reordered on rvss   reordered on pipeline
+rv5-h-f    1 -> 0          94 -> 84          10 -> 0           same                same                same
 ...
 OK: every reordered program gives the reference registers and memory
 ```
+
+`--window N` sets the window size (default 16) and `--fixed` uses fixed windows
+(1..W, W+1..2W, ...) instead of sliding ones. `--lines` adds, for the pipelines with a
+hazard unit, every line that waited or made another line wait: how often it ran, its
+stall cycles and the stall cycles it caused. Stall cycles where no instruction ahead
+writes a register the waiting line reads are listed separately (Kites' hazard unit
+reads immediate bits as `rs2`, see `docs/KNOWN_UI_ISSUES.md`).
 
 The exit code is 0 when every reordered program matches the reference. "original on
 pipe" is for information: a program without NOPs is not meant to be correct on a

@@ -17,6 +17,14 @@ The tool's own `main.c`, `show.c` and `verify.c` are not included: Kites uses
 the scheduler as a library. `CMakeLists.txt` builds these files into the
 `kites_list_scheduler` static library (C99), which `kites_core` links.
 
-Kites-side code lives in `src/reorder/` (analysis, explanations, diff) and
-`src/ui/reorder_panel/` (the "Instruction Reordering" dock). To update the
-scheduler, copy the new files over these ones; nothing in Kites edits them.
+Kites-side code lives in `src/reorder/` (analysis, explanations, diff, the
+Suggestions data and the measured runs) and `src/ui/reorder_panel/` +
+`src/ui/suggestions/` (the "Instruction Reordering" dock). It only calls the public
+functions declared in `common.h` (`read_program`, `schedule_program`, `issue`,
+`stall_producer`, `build_dag`, ...). To update the scheduler, copy the new files over
+these ones; nothing in Kites edits them. If a function's signature changes, only
+`src/reorder/reorder_analysis.cpp` has to follow.
+
+Kites works around two cases in its own code (`prepare()` in reorder_analysis.cpp):
+`lw rd, label` (the tool sees no destination register) and `auipc` (its value depends
+on where it is) become fixed lines; `li` gets the size Kites' assembler gives it.

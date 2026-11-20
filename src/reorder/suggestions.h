@@ -1,14 +1,11 @@
 /**
- * @file scheduler.h
- * @brief Instruction scheduler for the 5-stage pipelines ("Style C" suggestions).
+ * @file suggestions.h
+ * @brief The "Suggestions" view of the Reorder panel: one move at a time.
  *
- * Plain C++ (no GUI). It reads the program the way Kites' own assembler parsed
- * it, splits it into basic blocks and windows, builds the weighted dependence
- * graph and reorders every window with the list-scheduling rules of the P-1
- * report (a height run and a succ run; keep the fewest stalls, then the
- * smallest move distance D). The student's NOPs are taken out and only the NOPs
- * that are still needed are put back, so the same output runs correctly with
- * the hazard unit on or off.
+ * The data comes from the same analysis as the diff view (reorder_analysis.h), so
+ * there is one scheduler for both views: the list scheduler in
+ * external/list_scheduler (src/reorder/reorder_suggestions.cpp turns its result
+ * into these structures).
  *
  * Every suggestion is reported in three parts:
  *   Moved  - the instruction that moves
@@ -24,14 +21,15 @@
 
 namespace Kites
 {
-namespace scheduler
+namespace suggestions
 {
 
 struct Options
 {
     bool forwarding = true; ///< which latency table: forwarding on or off
-    bool hazardUnit = true; ///< only changes the wording ("stall cycles" or "NOPs")
+    bool hazardUnit = true; ///< false: the code needs NOPs (they are recomputed for the new order)
     int window = 16;        ///< instructions per window (1..64)
+    bool slidingWindows = true; ///< windows 1..W, 2..W+1, ... (false: 1..W, W+1..2W, ...)
 };
 
 /// One row of a pipeline timeline: an instruction and when it goes through the pipeline.
@@ -55,7 +53,7 @@ struct BlockChange
     std::vector<std::string> newLines; ///< the lines that replace [firstLine, lastLine]
     int stallsBefore = 0;
     int stallsAfter = 0;
-    std::vector<TimelineRow> before; ///< original order (student NOPs taken out)
+    std::vector<TimelineRow> before; ///< original order (on no-hazard-unit pipelines: student NOPs taken out)
     std::vector<TimelineRow> after;  ///< suggested order
 };
 
@@ -85,7 +83,7 @@ struct Result
     Options options;
     std::vector<BlockChange> blocks;      ///< only blocks that change
     std::vector<Suggestion> suggestions;  ///< in line order
-    int stallsBefore = 0;  ///< whole program, student NOPs taken out
+    int stallsBefore = 0;  ///< whole program (no hazard unit: NOPs the code needs, student NOPs taken out)
     int stallsAfter = 0;
     int studentNops = 0;   ///< NOP lines in the editor text
     std::vector<std::string> notes;
@@ -100,5 +98,5 @@ std::string applyBlock(const std::string &source, const BlockChange &change);
 /// Apply every suggestion: apply one block, analyze again, until nothing changes.
 std::string applyAll(const std::string &source, const Options &options);
 
-} // namespace scheduler
+} // namespace suggestions
 } // namespace Kites

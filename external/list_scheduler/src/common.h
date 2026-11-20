@@ -11,6 +11,7 @@
  *   dag.c       build the dependence graph (DAG) of a window
  *   sched.c     list scheduling + loop over blocks and windows
  *   verify.c    SEPARATE program: checks a reordered .s against the original
+ *   optimal.c   SEPARATE program: brute-force best order of small blocks
  *   show.c      print the original and reordered programs with nops
  *   main.c      command line and report
  */
@@ -32,6 +33,8 @@
 #define MAX_WIN     64      /* largest window size W                    */
 #define MAX_WORDS   9       /* words on one line: mnemonic + 8 operands */
 #define MAX_WORD    32      /* characters in one word                   */
+#define NREGS       64      /* registers: x0..x31 = 0..31, f0..f31 = 32..63 */
+#define FREG(k)     (32 + (k))  /* number of floating-point register fk  */
 
 /* ------------------------------------------------------------------ */
 /* Instruction classes (decide the pipeline behaviour)                 */
@@ -65,6 +68,7 @@
 #define FMT_RET     16  /* ret                                          */
 #define FMT_CALL    17  /* call label                                   */
 #define FMT_TAIL    18  /* tail label                                   */
+#define FMT_R4      19  /* fmadd.s rd, rs1, rs2, rs3                    */
 
 /* One row of the instruction table in isa.c */
 struct OpInfo {
@@ -89,7 +93,7 @@ struct Instr {
     int  known;                 /* 0 if the mnemonic is not in the table */
     int  cls;                   /* CLASS_...                            */
 
-    int  rd;                    /* destination register, -1 if none     */
+    int  rd;                    /* destination register, -1 if none (0..63, see NREGS) */
     int  src[MAX_SRC];          /* source registers                     */
     int  nsrc;                  /* how many source registers            */
 
@@ -146,8 +150,8 @@ typedef struct HazardModel HazardModel;
  * Time is counted in issue slots: normally one instruction per slot.
  */
 struct PipeState {
-    int writer[32];     /* instruction that last wrote register r (-1 = none) */
-    int slot[32];       /* slot in which that writer issued             */
+    int writer[NREGS];  /* instruction that last wrote register r (-1 = none) */
+    int slot[NREGS];    /* slot in which that writer's result is made    */
     int next_slot;      /* next free slot                               */
 };
 typedef struct PipeState PipeState;
@@ -167,6 +171,7 @@ struct Dag {
     int  edge[MAX_WIN][MAX_WIN];
     char type[MAX_WIN][MAX_WIN];
     int  ext_ready[MAX_WIN];    /* earliest slot because of instructions BEFORE the window */
+    int  occ[MAX_WIN];          /* slots the node occupies (2-part pseudos: more) */
     int  height[MAX_WIN];       /* longest path to the end of the window */
     int  nsucc[MAX_WIN];        /* number of successors                 */
     int  npred[MAX_WIN];        /* number of predecessors               */
@@ -185,8 +190,20 @@ typedef struct Dag Dag;
 #define PRIO_HEIGHT  1      /* longest dependence chain first, then most successors */
 #define PRIO_SUCC    2      /* most successors first, then longest chain            */
 
+/*
+ * How the windows move through a block (option -a):
+ *   slide    w1 = 1..W,  w2 = 2..W+1, ...    (the default: only the first
+ *            instruction of each window is kept for good, the window then
+ *            moves by one)
+ *   fixed    w1 = 1..W,  w2 = W+1..2W, ...   (the P-1 method)
+ * In slide, w2 sees the instructions in the order chosen by w1.
+ */
+#define WIN_FIXED    0
+#define WIN_SLIDE    1
+
 struct Options {
     int window;         /* window size W                                */
+    int win_mode;       /* WIN_FIXED or WIN_SLIDE                        */
     int reorder;        /* 0 = keep original order (only count stalls)  */
     int insert_nops;    /* 1 = write nops where stalls remain           */
 };
@@ -199,27 +216,34 @@ typedef struct Options Options;
 /* isa.c */
 int  find_op(char mnem[], OpInfo *op);
 int  reg_number(char name[]);
+void reg_name(int r, char out[]);
 int  reads_reg(Instr *in, int r);
 int  is_memory(Instr *in);
 
 /* parser.c */
 int  read_program(char filename[], Program *p);
-void write_program(FILE *out, Program *p, int order[], int nops[], int with_nops);
+void write_program(FILE *out, Program *p, int order[], int nops[], int inner[], int with_nops);
 
 /* hazard.c */
 int  required_gap(Program *p, HazardModel *m, int producer);
+int  lookahead_lines(HazardModel *m);
+int  inner_stalls(Program *p, HazardModel *m, int i);
+int  slots_used(Program *p, HazardModel *m, int i);
 void reset_state(PipeState *st);
 void copy_state(PipeState *to, PipeState *from);
 int  issue(Program *p, HazardModel *m, PipeState *st, int i);
+int  stall_producer(Program *p, HazardModel *m, PipeState *st, int i);
 int  count_stalls(Program *p, HazardModel *m, int order[], int stalls[]);
 
 /* dag.c */
-void build_dag(Program *p, HazardModel *m, PipeState *st, int nodes[], int n, Dag *g);
+void build_dag(Program *p, HazardModel *m, PipeState *st, int nodes[], int n, Dag *g,
+               int rest_start, int block_end);
 int  may_alias(Instr *a, int a_base_writer, Instr *b, int b_base_writer);
 
 /* sched.c */
 void list_schedule(Program *p, Dag *g, int start_slot, int priority, int result[]);
 void schedule_program(Program *p, HazardModel *m, Options *opt, int order[]);
+int  swap_length(int perm[], int n);
 
 
 /* show.c */

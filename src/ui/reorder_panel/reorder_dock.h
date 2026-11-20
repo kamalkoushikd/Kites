@@ -23,6 +23,7 @@ class QToolButton;
 namespace Kites
 {
 class EditorTab;
+class MeasuredView;
 class ProcessorManager;
 class ReorderDiffView;
 class SuggestionPanel;
@@ -83,6 +84,7 @@ private:
 
     QComboBox *m_variantCombo = nullptr;
     QSpinBox *m_windowSpin = nullptr;
+    QComboBox *m_windowModeCombo = nullptr; ///< Sliding / Fixed windows
     QPushButton *m_analyzeButton = nullptr;
     QPushButton *m_applyButton = nullptr;
     QPushButton *m_revertButton = nullptr;
@@ -90,8 +92,10 @@ private:
     QToolButton *m_sideBySideButton = nullptr;
     QToolButton *m_unifiedButton = nullptr;
     QToolButton *m_suggestionsButton = nullptr;
-    QStackedWidget *m_views = nullptr;           ///< page 0: the diff, page 1: the suggestions
+    QStackedWidget *m_views = nullptr;           ///< page 0: the diff, 1: the suggestions, 2: measured
     SuggestionPanel *m_suggestions = nullptr;
+    QToolButton *m_measuredButton = nullptr;
+    MeasuredView *m_measured = nullptr;
     QCheckBox *m_onlyChangedCheck = nullptr;
     QWidget *m_statusRow = nullptr; ///< second row: summary and "Only changed blocks" (diff views only)
     QLabel *m_summaryLabel = nullptr;

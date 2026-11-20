@@ -40,7 +40,8 @@ std::string variantDescription(PipelineVariant variant);
 struct AnalysisOptions
 {
     PipelineVariant variant = PipelineVariant::HazardUnitForwarding;
-    int windowSize = 16; ///< 1..64 instructions per scheduling window
+    int windowSize = 16;        ///< 1..64 instructions per scheduling window
+    bool slidingWindows = true; ///< windows 1..W, 2..W+1, ... (false: 1..W, W+1..2W, ...)
 };
 
 enum class CellKind

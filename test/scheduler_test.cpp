@@ -1,12 +1,14 @@
-// Tests for src/scheduler: the examples of the P-1 report must give the same results.
+// Tests for src/reorder: the examples of the P-1 report and of the scheduler's own test files
+// (Kites-Instruction-Reordering/list_scheduler/tests) must give the same results as the tool.
 #include <gtest/gtest.h>
 
-#include "scheduler/scheduler.h"
+#include "reorder/reorder_analysis.h"
+#include "reorder/suggestions.h"
 
 #include <string>
 #include <vector>
 
-using namespace Kites::scheduler;
+using namespace Kites::suggestions;
 
 namespace
 {
@@ -131,9 +133,68 @@ TEST(Scheduler, StallAcrossABlockEdgeIsCounted)
     EXPECT_EQ(result.stallsBefore, 1);
 }
 
-TEST(Scheduler, ReportsAssemblyErrors)
+TEST(Scheduler, UnknownInstructionStaysInPlace)
 {
-    const Result result = analyzeWith("addz x1, x2, x3\n", true);
-    EXPECT_FALSE(result.ok);
-    EXPECT_FALSE(result.error.empty());
+    // the tool leaves an instruction it does not know where it is, and moves nothing across it
+    const Result result = analyzeWith("ld x5, 0(x10)\naddz x1, x2, x3\nadd x6, x5, x5\n", true);
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_TRUE(result.blocks.empty());
+}
+
+// ---- the same totals as the tool (reorder -q) on its test files ---------------------------------------
+
+namespace
+{
+using Kites::reorder::PipelineVariant;
+
+/// Stalls before -> after, as the tool's "TOTAL stalls: a -> b" line.
+std::pair<int, int> totals(const std::string &source, bool forwarding, int window, bool sliding)
+{
+    Kites::reorder::AnalysisOptions options;
+    options.variant = forwarding ? PipelineVariant::HazardUnitForwarding : PipelineVariant::HazardUnitNoForwarding;
+    options.windowSize = window;
+    options.slidingWindows = sliding;
+    const Kites::reorder::AnalysisResult result = Kites::reorder::analyzeProgram(source, options);
+    EXPECT_TRUE(result.ok) << result.error;
+    return {result.stallsBefore, result.stallsAfter};
+}
+
+// tests/sliding_window.s
+const std::string kSlidingWindow = "addi x11, x0, 1\naddi x12, x0, 2\naddi x13, x0, 3\nld   x5, 0(x10)\n"
+                                   "add  x6, x5, x5\nadd  x7, x6, x6\nsd   x7, 8(x10)\n";
+// tests/cross_block.s
+const std::string kCrossBlock = "    addi x8, x3, 512\n    addi x5, x0, 5\n    lw   x9, 0(x3)\nNext:\n"
+                                "    add  x10, x9, x9\n    sub  x11, x10, x9\n    sw   x11, 4(x3)\n";
+// tests/edge_cases/08_pseudo_inner_stalls.s
+const std::string kInnerStalls = ".data\nvalue: .word 5\n.text\n    la   t0, value\n    li   t1, 100000\n"
+                                 "    lw   t2, 0(t0)\n    call func\nfunc:\n    ret\n";
+// tests/edge_cases/12_fp_int_crossing.s
+const std::string kFpIntCrossing = "    addi     t1, t1, 1\n    fcvt.s.w ft0, t1\n    fcvt.w.s a0, ft0, rtz\n"
+                                   "    flt.s    t2, ft0, ft1\n    add      t3, t2, a0\n";
+} // namespace
+
+TEST(SchedulerTool, SlidingWindowsSeeAcrossWindowEdges)
+{
+    EXPECT_EQ(totals(kSlidingWindow, true, 4, true), std::make_pair(1, 0));
+    EXPECT_EQ(totals(kSlidingWindow, true, 4, false), std::make_pair(1, 1));
+    EXPECT_EQ(totals(kSlidingWindow, false, 4, true), std::make_pair(6, 4));
+    EXPECT_EQ(totals(kSlidingWindow, false, 4, false), std::make_pair(6, 6));
+}
+
+TEST(SchedulerTool, CrossBlockPrecautionMovesTheLoadUp)
+{
+    EXPECT_EQ(totals(kCrossBlock, true, 16, true), std::make_pair(1, 0));
+    EXPECT_EQ(totals(kCrossBlock, false, 16, true), std::make_pair(6, 4));
+}
+
+TEST(SchedulerTool, StallsInsidePseudoInstructionsAreCounted)
+{
+    EXPECT_EQ(totals(kInnerStalls, true, 16, true), std::make_pair(0, 0));
+    EXPECT_EQ(totals(kInnerStalls, false, 16, true), std::make_pair(8, 8));
+}
+
+TEST(SchedulerTool, FloatingPointRegistersAreTracked)
+{
+    EXPECT_EQ(totals(kFpIntCrossing, true, 16, true), std::make_pair(0, 0));
+    EXPECT_EQ(totals(kFpIntCrossing, false, 16, true), std::make_pair(6, 6));
 }

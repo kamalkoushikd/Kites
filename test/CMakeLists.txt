@@ -32,7 +32,7 @@ gtest_discover_tests(kites_test
         FAIL_REGULAR_EXPRESSION ".*FAILED.*"
 )
 
-# The scheduler tests (src/scheduler) also build on their own, with gtest's main,
+# The scheduler tests (src/reorder) also build on their own, with gtest's main,
 # so they run on every platform (kites_test includes them too).
 add_executable(kites_scheduler_test scheduler_test.cpp)
 target_link_libraries(kites_scheduler_test PRIVATE kites_core GTest::gtest_main)

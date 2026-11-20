@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scheduler/scheduler.h"
+#include "reorder/suggestions.h"
 
 #include <QWidget>
 #include <QPointer>
@@ -31,7 +31,7 @@ class ProcessorManager;
  * "Side by side" and "Unified".
  *
  * Flow:
- *   Analyze (Reorder panel) -> scheduler::analyze() on the editor text
+ *   Analyze (Reorder panel) -> suggestions::analyze() on the editor text
  *                           -> waiting lines get a squiggle (hover = the three lines)
  *                           -> the view shows suggestion 1 of N with its block's timeline
  *   Apply                   -> rewrites only that block, as one undo step, then analyzes again
@@ -47,7 +47,7 @@ public:
     /// Watches the toolbar's Run button, so pressing Run can show the banner first.
     void attachRunButton(QMainWindow *window);
     /// Pipeline and window size to analyze for (the Reorder panel's "Pipeline" and "Window").
-    void setOptions(const scheduler::Options &options);
+    void setOptions(const suggestions::Options &options);
 
 signals:
     /// "Review suggestions" was clicked in the Run banner.
@@ -63,10 +63,10 @@ protected:
 
 private:
     QPlainTextEdit *editor() const;
-    scheduler::Options processorOptions() const;
+    suggestions::Options processorOptions() const;
     bool pipelineProcessor() const;
     std::vector<int> visibleSuggestions() const;
-    QString suggestionKey(const scheduler::Suggestion &suggestion) const;
+    QString suggestionKey(const suggestions::Suggestion &suggestion) const;
     void showSuggestion(int index);
     void updateSquiggles();
     void apply();
@@ -103,8 +103,8 @@ private:
     QLabel *m_runBannerLabel = nullptr;
     bool m_runAnyway = false; ///< the next Run click goes through without the banner
 
-    scheduler::Options m_options; ///< set by the Reorder panel
-    scheduler::Result m_result;
+    suggestions::Options m_options; ///< set by the Reorder panel
+    suggestions::Result m_result;
     bool m_analyzed = false;
     QString m_analyzedText;
     QSet<QString> m_dismissed;

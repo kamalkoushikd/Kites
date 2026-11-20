@@ -33,8 +33,8 @@ PipelineTimeline::PipelineTimeline(QWidget *parent) : QWidget(parent)
             [this](const QString &) { update(); });
 }
 
-void PipelineTimeline::setBlock(const std::vector<scheduler::TimelineRow> &before,
-                                const std::vector<scheduler::TimelineRow> &after, bool hazardUnit, int highlightLine)
+void PipelineTimeline::setBlock(const std::vector<suggestions::TimelineRow> &before,
+                                const std::vector<suggestions::TimelineRow> &after, bool hazardUnit, int highlightLine)
 {
     m_before = before;
     m_after = after;
@@ -48,7 +48,7 @@ void PipelineTimeline::setBlock(const std::vector<scheduler::TimelineRow> &befor
     int widest = 0;
     for (const auto *rows : {&m_before, &m_after})
     {
-        for (const scheduler::TimelineRow &row : *rows)
+        for (const suggestions::TimelineRow &row : *rows)
         {
             widest = std::max(widest, metrics.horizontalAdvance(QStringLiteral("%1  %2").arg(row.line).arg(
                                           QString::fromStdString(row.text))));
@@ -71,7 +71,7 @@ int PipelineTimeline::cycles() const
     int last = 0;
     for (const auto *rows : {&m_before, &m_after})
     {
-        for (const scheduler::TimelineRow &row : *rows)
+        for (const suggestions::TimelineRow &row : *rows)
         {
             // IF, the waiting cycles, then ID EX MEM WB; a pseudo-instruction takes extra slots
             last = std::max(last, row.fetchCycle + row.stalls + 5 + row.instructions - 1);
@@ -148,7 +148,7 @@ void PipelineTimeline::paintEvent(QPaintEvent *event)
 }
 
 int PipelineTimeline::paintTimeline(QPainter &painter, int x, int y, int width, const QString &title,
-                                    const std::vector<scheduler::TimelineRow> &rows, bool after)
+                                    const std::vector<suggestions::TimelineRow> &rows, bool after)
 {
     const ThemeManager &theme = ThemeManager::getInstance();
     const QColor background = theme.getEditorBackgroundColor();
@@ -173,7 +173,7 @@ int PipelineTimeline::paintTimeline(QPainter &painter, int x, int y, int width, 
     }
     y += m_rowHeight;
 
-    for (const scheduler::TimelineRow &row : rows)
+    for (const suggestions::TimelineRow &row : rows)
     {
         const QRect rowRect(x, y, width, m_rowHeight);
         const bool highlight = after && row.line == m_highlightLine;

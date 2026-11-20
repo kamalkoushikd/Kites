@@ -6,10 +6,12 @@
 #include "processor/rv5s/rv5s_processor_nh_f.h"
 #include "processor/rv5s/rv5s_processor_nh_nf.h"
 #include "processor/rvss/rvss_processor.h"
-#include "scheduler/scheduler.h"
+#include "reorder/run_profile.h"
+#include "reorder/suggestions.h"
 #include "utils/utils.h"
 
 #include <QApplication>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -151,10 +153,42 @@ std::string differences(const RunResult &expected, const RunResult &actual)
     return out.str();
 }
 
+/// Measured stalls (hazard unit) or executed NOPs (no hazard unit) of one run, Kites' debug output hidden.
+reorder::RunProfile measure(const std::string &source, const Pipeline &pipeline)
+{
+    using reorder::PipelineVariant;
+    const PipelineVariant variant =
+        pipeline.hazardUnit ? (pipeline.forwarding ? PipelineVariant::HazardUnitForwarding : PipelineVariant::HazardUnitNoForwarding)
+                            : (pipeline.forwarding ? PipelineVariant::NoHazardUnitForwarding
+                                                   : PipelineVariant::NoHazardUnitNoForwarding);
+    std::ostringstream sink;
+    std::streambuf *old = std::cout.rdbuf(sink.rdbuf());
+    reorder::RunProfile profile = reorder::profileRun(source, variant);
+    std::cout.rdbuf(old);
+    return profile;
+}
+
+/// Lines with measured stalls, most first: "line  ran  stalls  caused".
+void printLines(const std::string &title, const reorder::RunProfile &profile)
+{
+    std::vector<std::pair<int, reorder::LineRun>> rows(profile.lines.begin(), profile.lines.end());
+    std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) { return a.second.stalls > b.second.stalls; });
+    std::cout << "    " << title << ": line  ran  stalls  caused\n";
+    for (const auto &[line, run] : rows)
+    {
+        if (run.stalls > 0 || run.caused > 0)
+            std::cout << "      " << std::setw(6) << line << std::setw(5) << run.executed << std::setw(8) << run.stalls
+                      << std::setw(8) << run.caused << "\n";
+    }
+    if (profile.unexplained > 0)
+        std::cout << "      " << profile.unexplained << " stall cycle(s) with no instruction ahead that writes what "
+                     "the waiting line reads (Kites' hazard unit)\n";
+}
+
 void usage()
 {
     std::cerr << "usage: kites-cli compare FILE [--vm rv5-h-f|rv5-h-nf|rv5-nh-f|rv5-nh-nf|all] [--window N]\n"
-                 "                              [--mem START_HEX BYTES] [--write-reordered PREFIX]\n";
+                 "                              [--fixed] [--lines] [--mem START_HEX BYTES] [--write-reordered PREFIX]\n";
 }
 
 } // namespace
@@ -175,6 +209,8 @@ int runCompareMode(int argc, char *argv[])
     std::string which = "all";
     std::string writePrefix;
     int window = 16;
+    bool sliding = true;    // --fixed: the P-1 fixed windows
+    bool showLines = false; // --lines: measured stalls per line
     uint64_t memStart = 0x10000000;
     uint64_t memBytes = 256;
     for (int i = 3; i < argc; ++i)
@@ -189,6 +225,10 @@ int runCompareMode(int argc, char *argv[])
             memStart = std::stoull(argv[++i], nullptr, 16);
             memBytes = std::stoull(argv[++i]);
         }
+        else if (arg == "--fixed")
+            sliding = false;
+        else if (arg == "--lines")
+            showLines = true;
         else if (arg == "--write-reordered" && i + 1 < argc)
             writePrefix = argv[++i];
         else
@@ -214,22 +254,23 @@ int runCompareMode(int argc, char *argv[])
         return 2;
     }
 
-    std::cout << "file " << file << "  (window " << window << ", memory 0x" << std::hex << memStart << std::dec << " + "
+    std::cout << "file " << file << "  (window " << window << (sliding ? " sliding" : " fixed") << ", memory 0x" << std::hex << memStart << std::dec << " + "
               << memBytes << " bytes)\n";
     std::cout << std::left << std::setw(11) << "pipeline" << std::setw(16) << "stalls (model)" << std::setw(18)
-              << "cycles (Kites)" << std::setw(20) << "original on pipe" << std::setw(20) << "reordered on rvss"
+              << "cycles (Kites)" << std::setw(18) << "stalls (Kites)" << std::setw(20) << "original on pipe" << std::setw(20) << "reordered on rvss"
               << "reordered on pipeline\n";
     bool allMatch = true;
     for (const Pipeline &pipeline : kPipelines)
     {
         if (which != "all" && which != pipeline.name)
             continue;
-        scheduler::Options options;
+        suggestions::Options options;
         options.forwarding = pipeline.forwarding;
         options.hazardUnit = pipeline.hazardUnit;
         options.window = window;
-        const scheduler::Result analysis = scheduler::analyze(original, options);
-        const std::string reordered = scheduler::applyAll(original, options);
+        options.slidingWindows = sliding;
+        const suggestions::Result analysis = suggestions::analyze(original, options);
+        const std::string reordered = suggestions::applyAll(original, options);
         if (!writePrefix.empty())
         {
             std::ofstream(writePrefix + "_" + pipeline.name + ".s") << reordered;
@@ -247,14 +288,27 @@ int runCompareMode(int argc, char *argv[])
         cycles << (before.ok ? std::to_string(before.cycles) : std::string("-")) << " -> " << after.cycles;
         // "original on pipe" is informational: a plain program without NOPs is not meant to be
         // correct on a pipeline without a hazard unit.
+        // measured: stall cycles with a hazard unit, executed NOPs without one
+        const reorder::RunProfile measuredBefore = measure(original, pipeline);
+        const reorder::RunProfile measuredAfter = measure(reordered, pipeline);
+        auto measured = [&](const reorder::RunProfile &profile) {
+            return profile.ok ? std::to_string(pipeline.hazardUnit ? profile.stalls : profile.nops) : std::string("-");
+        };
+        const std::string kitesStalls = measured(measuredBefore) + " -> " + measured(measuredAfter) +
+                                        (pipeline.hazardUnit ? "" : " nop");
         std::cout << std::left << std::setw(11) << pipeline.name << std::setw(16) << stalls.str() << std::setw(18)
-                  << cycles.str() << std::setw(20) << (originalMatch ? "same" : "different")
+                  << cycles.str() << std::setw(18) << kitesStalls << std::setw(20) << (originalMatch ? "same" : "different")
                   << std::setw(20) << (singleMatch ? "same" : "DIFFERENT") << (pipelineMatch ? "same" : "DIFFERENT")
                   << "\n";
         if (!singleMatch)
             std::cout << "    reordered on rvss: " << differences(reference, afterSingle) << "\n";
         if (!pipelineMatch)
             std::cout << "    reordered on " << pipeline.name << ": " << differences(reference, after) << "\n";
+        if (showLines && pipeline.hazardUnit)
+        {
+            printLines("original", measuredBefore);
+            printLines("reordered", measuredAfter);
+        }
     }
     std::cout << (allMatch ? "OK: every reordered program gives the reference registers and memory\n"
                            : "FAILED: a reordered program differs from the reference\n");

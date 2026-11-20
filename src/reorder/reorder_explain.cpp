@@ -54,7 +54,7 @@ std::string instructionCode(const Context &ctx, int instruction)
 
 std::string registerName(const Context &ctx, int instruction, int reg)
 {
-    if (reg < 0 || reg >= 32)
+    if (reg < 0 || reg >= NREGS)
     {
         return "?";
     }
@@ -70,7 +70,9 @@ std::string registerName(const Context &ctx, int instruction, int reg)
             return escapeHtml(words[k]); // the spelling the student used (t0 or x5)
         }
     }
-    return reg_names[reg];
+    char name[MAX_WORD];
+    reg_name(reg, name); // x and f registers (0..31, 32..63)
+    return name;
 }
 
 namespace
@@ -158,17 +160,9 @@ std::string stallWord(const Context &ctx)
     return ctx.hazardUnit ? "stall" : "NOP";
 }
 
-std::string ruleName(int candidate)
+std::string windowWord(const Context &ctx)
 {
-    switch (candidate)
-    {
-    case 1:
-        return "longest-chain rule";
-    case 2:
-        return "most-dependents rule";
-    default:
-        return "original order";
-    }
+    return ctx.options.slidingWindows ? "sliding windows" : "fixed windows";
 }
 
 /// Why `later` has to stay after `earlier` (there is a dependence edge between them).
@@ -345,69 +339,60 @@ std::string remainingNote(const Context &ctx, int consumer)
                " in an earlier block. Instructions are never moved past a label or a branch, so reordering "
                "cannot remove this wait.";
     }
-    if (ctx.windowOf[producer] != ctx.windowOf[consumer])
+    const int block = ctx.blockOf[consumer];
+    const int start = blockStart(ctx, block);
+    const int end = blockEnd(ctx, block);
+    const int window = ctx.options.windowSize;
+    if (!ctx.options.slidingWindows && (producer - start) / window != (consumer - start) / window)
     {
-        return capitalized(lineOf(ctx, producer)) + " is in an earlier window of " +
-               std::to_string(ctx.options.windowSize) +
-               " instructions, and instructions only move inside their window. A larger window may help.";
+        return capitalized(lineOf(ctx, producer)) + " is in an earlier fixed window of " + std::to_string(window) +
+               " instructions, and instructions only move inside their window. Sliding windows or a larger "
+               "window may help.";
     }
-    if (!ctx.traceValid)
+
+    // Instructions that must come before the producer / after the consumer (whole chains).
+    const int count = end - start;
+    std::vector<bool> beforeProducer(static_cast<size_t>(count), false);
+    std::vector<bool> afterConsumer(static_cast<size_t>(count), false);
+    beforeProducer[producer - start] = true;
+    for (int v = producer; v >= start; --v)
     {
-        return "";
-    }
-    const WindowTrace &window = ctx.windows[ctx.windowOf[consumer]];
-    if (!window.dag)
-    {
-        return "";
-    }
-    // reach[u] = every node that has to come after u
-    const int count = window.end - window.start;
-    std::vector<std::uint64_t> reach(static_cast<size_t>(count), 0);
-    for (int u = count - 1; u >= 0; --u)
-    {
-        for (int v = u + 1; v < count; ++v)
+        for (int w = v + 1; w <= producer && !beforeProducer[v - start]; ++w)
         {
-            if (window.dag->edge[u][v] != -1)
-            {
-                reach[u] |= (std::uint64_t{1} << v) | reach[v];
-            }
+            beforeProducer[v - start] = beforeProducer[w - start] && dependsOn(ctx, v, w);
         }
     }
-    const int producerNode = producer - window.start;
-    const int consumerNode = consumer - window.start;
-    std::vector<int> candidates;
-    for (int v = 0; v < count; ++v)
+    afterConsumer[consumer - start] = true;
+    for (int v = consumer; v < end; ++v)
     {
-        if (v == producerNode || v == consumerNode)
+        for (int u = consumer; u < v && !afterConsumer[v - start]; ++u)
+        {
+            afterConsumer[v - start] = afterConsumer[u - start] && dependsOn(ctx, u, v);
+        }
+    }
+    std::vector<int> candidates;
+    for (int v = start; v < end; ++v)
+    {
+        if (v == producer || v == consumer || beforeProducer[v - start] || afterConsumer[v - start])
         {
             continue;
         }
-        const bool mustBeBefore = (reach[v] >> producerNode) & 1U;
-        const bool mustBeAfter = (reach[consumerNode] >> v) & 1U;
-        const int slot = ctx.slotOf[window.start + v];
+        const int slot = ctx.slotOf[v];
         const bool alreadyBetween = ctx.slotOf[producer] < slot && slot < ctx.slotOf[consumer];
-        if (!mustBeBefore && !mustBeAfter && !alreadyBetween)
+        if (!alreadyBetween)
         {
-            candidates.push_back(window.start + v);
+            candidates.push_back(v);
         }
     }
     if (candidates.empty())
     {
-        const int block = ctx.blockOf[consumer];
-        if (blockEnd(ctx, block) - blockStart(ctx, block) > count)
-        {
-            return "No other instruction in this window of " + std::to_string(ctx.options.windowSize) +
-                   " instructions can go between " + lineOf(ctx, producer) + " and " + lineOf(ctx, consumer) +
-                   " without breaking a dependence. Instructions only move inside their window; a larger "
-                   "window may help.";
-        }
         return "No other instruction in this block can go between " + lineOf(ctx, producer) + " and " +
                lineOf(ctx, consumer) + " without breaking a dependence, so reordering cannot remove this wait.";
     }
-    return capitalized(lineList(ctx, candidates)) + (candidates.size() == 1 ? " could" : " could") +
-           " be placed between them without breaking a dependence, but the scheduler's rules did not put " +
-           (candidates.size() == 1 ? "it" : "them") +
-           " there. (They are simple greedy rules, so they do not always find the best order.)";
+    return capitalized(lineList(ctx, candidates)) + " could be placed between them without breaking a "
+           "dependence, but the scheduler's rules did not put " + (candidates.size() == 1 ? "it" : "them") +
+           " there. (They are simple greedy rules inside windows of " + std::to_string(window) +
+           " instructions, so they do not always find the best order.)";
 }
 
 std::string waitTooltip(const Context &ctx, int consumer, bool newOrder)
@@ -501,6 +486,17 @@ std::string missingNopTooltip(const Context &ctx, int consumer)
     return html;
 }
 
+std::string innerStallTooltip(const Context &ctx, int instruction)
+{
+    const int inner = ctx.waitAfter[instruction].inner;
+    return "<b>" + capitalized(lineOf(ctx, instruction)) + " waits " + plural(inner, "cycle") +
+           " inside itself</b><p>" + code(ctx, instruction) +
+           " is a pseudo-instruction that Kites expands into two instructions (la = auipc + addi, a large li = "
+           "lui + addi, call = auipc + jalr). The second one reads the register the first one writes, and without "
+           "forwarding it has to wait for it. Reordering cannot change this, but the cycles are real, so they are "
+           "counted.</p>";
+}
+
 std::string moveShortText(const Context &ctx, const MoveInfo &move)
 {
     const int distance = move.toPos - move.fromPos;
@@ -526,11 +522,6 @@ std::string moveShortText(const Context &ctx, const MoveInfo &move)
     case MoveReason::KeepsRelativePlace:
         text += "other lines moved past it";
         break;
-    }
-    if (!ctx.traceValid)
-    {
-        text = capitalized(lineOf(ctx, move.instruction)) + (distance < 0 ? " ↑" : " ↓") +
-               std::to_string(std::abs(distance));
     }
     return text;
 }
@@ -561,12 +552,6 @@ std::string moveTooltip(const Context &ctx, const MoveInfo &move)
         html += "Now at the start of its block, before " + lineOf(ctx, after) + ".";
     }
 
-    if (!ctx.traceValid)
-    {
-        return html + "<p>The scheduler moved it while reordering this block.</p>";
-    }
-
-    const WindowTrace &window = ctx.windows[ctx.windowOf[instruction]];
     std::string why;
     switch (move.reason)
     {
@@ -622,15 +607,15 @@ std::string moveTooltip(const Context &ctx, const MoveInfo &move)
     case MoveReason::Neutral:
         if (move.saving < 0)
         {
-            why = "On its own this move adds " + plural(-move.saving, stallWord(ctx)) + ". It is part of the " +
-                  ruleName(window.chosen) + "'s order, which as a whole needs the fewest " + stallWord(ctx) +
-                  "s the scheduler found for this part of the block.";
+            why = "On its own this move adds " + plural(-move.saving, stallWord(ctx)) + ". It is part of the "
+                  "order the scheduler chose for this block, which as a whole needs the fewest " + stallWord(ctx) +
+                  "s it found.";
         }
         else
         {
             why = "This move does not change the number of " + stallWord(ctx) +
-                  "s by itself: putting it back gives the same result. It is a side effect of the " +
-                  ruleName(window.chosen) + ", which ordered this part of the block.";
+                  "s by itself: putting it back gives the same result. It is a side effect of the scheduling "
+                  "rule that ordered this part of the block.";
         }
         break;
     case MoveReason::KeepsRelativePlace:
@@ -718,75 +703,47 @@ std::string blockDecisionHtml(const Context &ctx, int block)
 {
     const int start = blockStart(ctx, block);
     const int end = blockEnd(ctx, block);
+    const std::string word = stallWord(ctx);
+    int before = 0;
+    int after = 0;
+    for (int i = start; i < end; ++i)
+    {
+        before += ctx.waitBefore[i].stalls;
+        after += ctx.waitAfter[i].stalls;
+    }
+    // the next block's first lines: stalls this block's end causes there (cross-block)
+    int nextBefore = 0;
+    int nextAfter = 0;
+    for (int i = end; i < std::min(end + lookahead_lines(const_cast<HazardModel *>(&ctx.model)), ctx.instructionCount);
+         ++i)
+    {
+        if (ctx.waitBefore[i].producer >= start && ctx.waitBefore[i].producer < end)
+        {
+            nextBefore += ctx.waitBefore[i].stalls;
+        }
+        if (ctx.waitAfter[i].producer >= start && ctx.waitAfter[i].producer < end)
+        {
+            nextAfter += ctx.waitAfter[i].stalls;
+        }
+    }
+
     std::string html = "<b>Block " + std::to_string(block + 1) + "</b> (lines " +
                        std::to_string(originalLineOf(ctx, start)) + "–" +
                        std::to_string(originalLineOf(ctx, end - 1)) + ")";
-    if (!ctx.traceValid)
+    html += "<p>" + std::string(ctx.hazardUnit ? "As written: " : "As written (not counting your NOPs): ") +
+            plural(before, word) + "; reordered: " + plural(after, word) + ".";
+    if (nextBefore > 0 || nextAfter > 0)
     {
-        return html;
+        html += " At the start of the next block, because of this block's last lines: " + plural(nextBefore, word) +
+                " → " + plural(nextAfter, word) + ".";
     }
-    int windowCount = 0;
-    for (const WindowTrace &window : ctx.windows)
-    {
-        windowCount += window.block == block ? 1 : 0;
-    }
-    bool explained = false;
-    for (const WindowTrace &window : ctx.windows)
-    {
-        if (window.block != block || !window.dag)
-        {
-            continue;
-        }
-        explained = true;
-        const std::string word = stallWord(ctx);
-        html += "<p>";
-        if (windowCount > 1)
-        {
-            html += "Lines " + std::to_string(originalLineOf(ctx, window.start)) + "–" +
-                    std::to_string(originalLineOf(ctx, window.end - 1)) + ": ";
-        }
-        html += std::string(ctx.hazardUnit ? "as written " : "as written (not counting your NOPs) ") +
-                plural(window.stalls[0], word) + "; longest-chain rule " +
-                plural(window.stalls[1], word) + " (move distance " + std::to_string(window.length[1]) +
-                "); most-dependents rule " + plural(window.stalls[2], word) + " (move distance " +
-                std::to_string(window.length[2]) + "). ";
-        const int chosen = window.chosen;
-        if (chosen == 0)
-        {
-            html += "<b>Kept as written:</b> no rule needs fewer " + word + "s.";
-        }
-        else
-        {
-            const int other = 3 - chosen;
-            html += "<b>Chosen: " + ruleName(chosen) + "</b> — ";
-            if (window.stalls[chosen] < window.stalls[other])
-            {
-                html += "it needs the fewest " + word + "s.";
-            }
-            else if (window.length[chosen] < window.length[other])
-            {
-                html += "both rules need " + plural(window.stalls[chosen], word) +
-                        ", and this one moves the instructions less (" + std::to_string(window.length[chosen]) +
-                        " vs " + std::to_string(window.length[other]) + ").";
-            }
-            else
-            {
-                html += "both rules give the same result.";
-            }
-        }
-        if (windowCount > 1)
-        {
-            html += " (Counted up to the end of the block.)";
-        }
-        html += "</p>";
-    }
-    if (explained)
-    {
-        html += "<p><i>The longest-chain rule places first the instruction with the longest chain of dependent "
-                "instructions after it; the most-dependents rule the one that most others wait for. Both first "
-                "prefer an instruction that can start without waiting. Move distance = how far all lines moved in "
-                "total.</i></p>";
-    }
+    html += "</p><p><i>How the order is chosen: the block is scheduled in " + windowWord(ctx) + " of " +
+            std::to_string(ctx.options.windowSize) +
+            " instructions. In each window the scheduler tries the order as written, the longest-chain rule and the "
+            "most-dependents rule (each also with the cross-block precaution: producers that the next block reads "
+            "early go first). It keeps the order with the fewest " + word +
+            "s in the block, then the fewest at the start of the next block, then the one that moves lines the "
+            "least.</i></p>";
     return html;
 }
 
@@ -804,7 +761,7 @@ std::string overviewHtml(const Context &ctx, const AnalysisResult &result)
 {
     std::string html = "<p><b>Pipeline:</b> " + escapeHtml(variantDescription(ctx.options.variant)) +
                        " &nbsp;·&nbsp; <b>Window:</b> " + std::to_string(ctx.options.windowSize) +
-                       " instructions</p>";
+                       " instructions, " + windowWord(ctx) + "</p>";
     if (ctx.hazardUnit)
     {
         html += "<p><b>Stalls:</b> " + std::to_string(result.stallsBefore) + " → " +

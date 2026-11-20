@@ -1,8 +1,8 @@
 /*
  * isa.c
  *
- * Table of the RISC-V instructions we understand: RV64I, RV64M and the
- * pseudo-instructions from the reference card.
+ * Table of the RISC-V instructions we understand: RV64I, RV64M, RV64F
+ * (single precision) and the pseudo-instructions from the reference card.
  * Also: register names, and small questions about one instruction
  * ("does it read register r?", ...).
  */
@@ -117,6 +117,55 @@ OpInfo op_table[] = {
     {"snez",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
     {"sltz",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
     {"sgtz",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+
+    /* ---------------- F extension (single precision) ----------------
+       Timed like the integer instructions: FP arithmetic = one EX cycle
+       (class ALU), flw = load, fsw = store. A rounding-mode operand
+       (rne, rtz, dyn, ...) at the end is allowed and ignored.          */
+    /* FP loads / stores (4 bytes; same memory as lw / sw) */
+    {"flw",       FMT_LOAD,   CLASS_LOAD,   4, 1, 0, 0},
+    {"fsw",       FMT_STORE,  CLASS_STORE,  4, 1, 0, 0},
+    /* FP arithmetic: frd, frs1, frs2 */
+    {"fadd.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fsub.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fmul.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fdiv.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fmin.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fmax.s",    FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fsgnj.s",   FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fsgnjn.s",  FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fsgnjx.s",  FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fsqrt.s",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    /* fused multiply-add: frd, frs1, frs2, frs3 */
+    {"fmadd.s",   FMT_R4,     CLASS_ALU,    0, 1, 0, 0},
+    {"fmsub.s",   FMT_R4,     CLASS_ALU,    0, 1, 0, 0},
+    {"fnmadd.s",  FMT_R4,     CLASS_ALU,    0, 1, 0, 0},
+    {"fnmsub.s",  FMT_R4,     CLASS_ALU,    0, 1, 0, 0},
+    /* compares: integer rd, FP sources */
+    {"feq.s",     FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"flt.s",     FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fle.s",     FMT_R,      CLASS_ALU,    0, 1, 0, 0},
+    {"fgt.s",     FMT_R,      CLASS_ALU,    0, 1, 0, 0},   /* pseudo: flt with swapped operands */
+    {"fge.s",     FMT_R,      CLASS_ALU,    0, 1, 0, 0},   /* pseudo: fle with swapped operands */
+    {"fclass.s",  FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    /* conversions and moves between the register files */
+    {"fcvt.w.s",  FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.wu.s", FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.l.s",  FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.lu.s", FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.s.w",  FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.s.wu", FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.s.l",  FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fcvt.s.lu", FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fmv.x.w",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fmv.w.x",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fmv.x.s",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},   /* old name of fmv.x.w */
+    {"fmv.s.x",   FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},   /* old name of fmv.w.x */
+    /* FP pseudo-instructions (fsgnj with the same source twice) */
+    {"fmv.s",     FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fneg.s",    FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+    {"fabs.s",    FMT_RD_RS,  CLASS_ALU,    0, 1, 0, 0},
+
     /* end of the table */
     {"",       0,          0,            0, 0, 0, 0}
 };
@@ -146,22 +195,50 @@ char reg_names[32][5] = {
     "s8",   "s9", "s10", "s11", "t3", "t4", "t5", "t6"
 };
 
-/* "x5" or "t0" -> 5.  Returns -1 if the name is not a register. */
+/* ABI names of the 32 floating-point registers: freg_names[10] is "fa0" (= f10) */
+char freg_names[32][5] = {
+    "ft0", "ft1", "ft2",  "ft3",  "ft4", "ft5", "ft6",  "ft7",
+    "fs0", "fs1", "fa0",  "fa1",  "fa2", "fa3", "fa4",  "fa5",
+    "fa6", "fa7", "fs2",  "fs3",  "fs4", "fs5", "fs6",  "fs7",
+    "fs8", "fs9", "fs10", "fs11", "ft8", "ft9", "ft10", "ft11"
+};
+
+/* "12" at name[start] -> 12; -1 if it is not a number below 32 */
+int small_number(char name[], int start)
+{
+    int i = start;
+    int n = 0;
+    if (name[i] < '0' || name[i] > '9')
+        return -1;
+    while (name[i] >= '0' && name[i] <= '9') {
+        n = n * 10 + (name[i] - '0');
+        i++;
+    }
+    if (name[i] != '\0' || n >= 32)
+        return -1;
+    return n;
+}
+
+/*
+ * "x5" or "t0" -> 5,  "f10" or "fa0" -> FREG(10) = 42.
+ * Returns -1 if the name is not a register.
+ */
 int reg_number(char name[])
 {
     int i, n;
 
     /* x0 .. x31 */
-    if (name[0] == 'x' && name[1] >= '0' && name[1] <= '9') {
-        n = 0;
-        i = 1;
-        while (name[i] >= '0' && name[i] <= '9') {
-            n = n * 10 + (name[i] - '0');
-            i++;
-        }
-        if (n < 32)
+    if (name[0] == 'x') {
+        n = small_number(name, 1);
+        if (n >= 0)
             return n;
-        return -1;
+    }
+
+    /* f0 .. f31 */
+    if (name[0] == 'f') {
+        n = small_number(name, 1);
+        if (n >= 0)
+            return FREG(n);
     }
 
     /* fp is another name for s0 */
@@ -172,8 +249,27 @@ int reg_number(char name[])
     for (i = 0; i < 32; i++) {
         if (strcmp(name, reg_names[i]) == 0)
             return i;
+        if (strcmp(name, freg_names[i]) == 0)
+            return FREG(i);
     }
     return -1;
+}
+
+/* 5 -> "x5",  FREG(10) -> "f10"  (for messages) */
+void reg_name(int r, char out[])
+{
+    int k = 1;
+    out[0] = 'x';
+    if (r >= 32) {
+        out[0] = 'f';
+        r = r - 32;
+    }
+    if (r >= 10) {
+        out[k] = '0' + r / 10;
+        k++;
+    }
+    out[k] = '0' + r % 10;
+    out[k + 1] = '\0';
 }
 
 /* Does instruction in read register r?  1 = yes, 0 = no */

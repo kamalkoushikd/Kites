@@ -21,12 +21,8 @@ extern "C"
 #include "list_scheduler/src/common.h"
 
 // Defined in the scheduler sources but not declared in common.h.
-int count_window_stalls(Program *p, HazardModel *m, PipeState *st, Dag *g, int perm[],
-                        int rest_start, int block_end);
-int swap_length(int perm[], int n);
 void find_blocks(Program *p);
 int split_words(char code[], char words[][MAX_WORD]);
-extern char reg_names[32][5];
 }
 
 namespace Kites
@@ -45,28 +41,14 @@ enum class Barrier
     NearBarrier,     ///< no-hazard-unit pipelines: next to a barrier, so it keeps its place too
 };
 
-/// Why an instruction waits before it can enter the pipeline.
+/// Why an instruction waits before it can enter the pipeline (from issue() and stall_producer()).
 struct Wait
 {
     int stalls = 0;     ///< cycles (or NOPs) needed before it
+    int inner = 0;      ///< stalls inside it (la, big li, call without forwarding): no NOP can help
     int producer = -1;  ///< instruction whose result it waits for
     int reg = -1;       ///< register it waits for
     int startSlot = 0;  ///< issue slot in which it enters IF
-};
-
-/// Everything the scheduler did for one window (copy of schedule_program's loop).
-struct WindowTrace
-{
-    int block = 0;
-    int start = 0;     ///< first instruction of the window
-    int end = 0;       ///< one past the last instruction of the window
-    int blockEnd = 0;  ///< one past the last instruction of the block
-    int chosen = 0;    ///< 0 = original order, 1 = height rule, 2 = successors rule
-    int stalls[3] = {0, 0, 0};
-    int length[3] = {0, 0, 0};
-    std::vector<int> candidate[3]; ///< node permutations (node = instruction - start)
-    std::shared_ptr<Dag> dag;      ///< only for windows with at least 2 instructions
-    PipeState before{};            ///< pipeline state when the window starts
 };
 
 enum class MoveReason
@@ -135,9 +117,9 @@ struct Context
     std::vector<int> order;       ///< final order: order[slot] = instruction
     std::vector<int> slotOf;      ///< slotOf[instruction] = slot in the final order
     std::vector<int> blockOf;     ///< per instruction
-    std::vector<WindowTrace> windows;
-    std::vector<int> windowOf; ///< per instruction, index into windows
-    bool traceValid = false;
+    /// per block: deps[b][u][v] = 1 if instruction start+v must stay after start+u (u < v),
+    /// from the scheduler's own build_dag()
+    std::vector<std::vector<std::vector<unsigned char>>> deps;
 
     std::vector<Wait> waitBefore;  ///< original order (NOPs of the original text ignored)
     std::vector<Wait> waitAfter;   ///< new order
@@ -156,7 +138,11 @@ struct Context
 };
 
 // reorder_analysis.cpp
+/// The whole analysis; ctx keeps the scheduler's data for callers that need more than the result.
+bool analyze(Context &ctx, const std::string &source, const AnalysisOptions &options, AnalysisResult &result);
 bool isNoHazardUnit(const Context &ctx);
+/// true if `later` must stay after `earlier` (same block, earlier < later in the original order)
+bool dependsOn(const Context &ctx, int earlier, int later);
 int blockStart(const Context &ctx, int block);
 int blockEnd(const Context &ctx, int block);
 int originalLineOf(const Context &ctx, int instruction); ///< 1-based
@@ -167,6 +153,7 @@ std::string escapeHtml(const std::string &text);
 std::string instructionCode(const Context &ctx, int instruction);
 std::string waitTooltip(const Context &ctx, int consumer, bool newOrder);
 std::string missingNopTooltip(const Context &ctx, int consumer);
+std::string innerStallTooltip(const Context &ctx, int instruction); ///< la / big li / call without forwarding
 std::string fixedNote(const Context &ctx, int consumer);
 std::string remainingNote(const Context &ctx, int consumer);
 std::string moveTooltip(const Context &ctx, const MoveInfo &move);

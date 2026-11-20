@@ -1,5 +1,6 @@
 #include "reorder_dock.h"
 
+#include "measured_view.h"
 #include "reorder_diff_view.h"
 
 #include "processor/processor_manager.h"
@@ -122,6 +123,12 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_windowSpin->setSuffix(tr(" instructions"));
     m_windowSpin->setToolTip(tr("Instructions are only reordered inside windows of this many instructions "
                                 "of a basic block (a block ends at a label or a branch)."));
+    m_windowModeCombo = new QComboBox(content);
+    m_windowModeCombo->addItem(tr("Sliding"));
+    m_windowModeCombo->addItem(tr("Fixed"));
+    m_windowModeCombo->setToolTip(tr("Sliding: windows 1..W, 2..W+1, ... (only the first instruction of each window is "
+                                     "kept; no hazard is lost at a window edge).\nFixed: windows 1..W, W+1..2W, ... "
+                                     "(the P-1 method)."));
     m_analyzeButton = new QPushButton(tr("Analyze"), content);
     m_analyzeButton->setToolTip(tr("Analyze the code in the editor"));
     m_copyButton = new QPushButton(tr("Copy patch"), content);
@@ -135,6 +142,7 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     controls->addSpacing(6);
     controls->addWidget(new QLabel(tr("Window"), content));
     controls->addWidget(m_windowSpin);
+    controls->addWidget(m_windowModeCombo);
     controls->addWidget(m_analyzeButton);
     controls->addStretch(1);
     controls->addWidget(m_copyButton);
@@ -179,12 +187,19 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_suggestionsButton->setAutoExclusive(true);
     m_suggestionsButton->setToolTip(tr("One move at a time: what moved, why, the effect, and a pipeline timeline. "
                                        "Waiting lines are underlined in the editor."));
+    m_measuredButton = new QToolButton(content);
+    m_measuredButton->setText(tr("Measured"));
+    m_measuredButton->setCheckable(true);
+    m_measuredButton->setAutoExclusive(true);
+    m_measuredButton->setToolTip(tr("Run the original and the reordered program on the pipeline and compare the "
+                                    "stalls they really have, line by line (loops count every time they run)."));
     // the Kites theme has no style for checked buttons; show which view is on
     const QString toggleStyle = QStringLiteral("QToolButton:checked { background-color: palette(highlight); "
                                                "color: palette(highlighted-text); }");
     m_sideBySideButton->setStyleSheet(toggleStyle);
     m_unifiedButton->setStyleSheet(toggleStyle);
     m_suggestionsButton->setStyleSheet(toggleStyle);
+    m_measuredButton->setStyleSheet(toggleStyle);
     status->addWidget(m_summaryLabel, 1);
     status->addWidget(m_onlyChangedCheck);
     layout->addWidget(m_statusRow);
@@ -192,6 +207,7 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     controls->insertWidget(controls->indexOf(m_copyButton), m_sideBySideButton);
     controls->insertWidget(controls->indexOf(m_copyButton), m_unifiedButton);
     controls->insertWidget(controls->indexOf(m_copyButton), m_suggestionsButton);
+    controls->insertWidget(controls->indexOf(m_copyButton), m_measuredButton);
     controls->insertSpacing(controls->indexOf(m_copyButton), 12);
 
     m_bannerLabel = new QLabel(content);
@@ -223,6 +239,8 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_views = new QStackedWidget(content);
     m_views->addWidget(splitter);      // Side by side / Unified
     m_views->addWidget(m_suggestions); // Suggestions
+    m_measured = new MeasuredView(content);
+    m_views->addWidget(m_measured);    // Measured
     layout->addWidget(m_views, 1);
     setWidget(content);
 
@@ -251,6 +269,8 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
                 }
             });
     connect(m_windowSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) { m_reanalyzeTimer->start(); });
+    connect(m_windowModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this](int) { m_reanalyzeTimer->start(); });
     connect(m_sideBySideButton, &QToolButton::toggled, this,
             [this](bool checked)
             {
@@ -270,6 +290,7 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
                 }
             });
     connect(m_suggestionsButton, &QToolButton::toggled, this, [this](bool) { updateViewMode(); });
+    connect(m_measuredButton, &QToolButton::toggled, this, [this](bool) { updateViewMode(); });
     connect(m_suggestions, &SuggestionPanel::reviewRequested, this, &ReorderDock::showSuggestions);
     connect(m_onlyChangedCheck, &QCheckBox::toggled, m_diffView, &ReorderDiffView::setCollapseUnchanged);
     connect(m_diffView, &ReorderDiffView::detailHovered, this,
@@ -475,15 +496,17 @@ bool ReorderDock::suggestionsView() const
     return m_suggestionsButton->isChecked();
 }
 
-// The diff's own controls are hidden in the Suggestions view, which has its own Apply.
+// The diff's own controls are hidden in the Suggestions view (it has its own Apply) and in
+// the Measured view.
 void ReorderDock::updateViewMode()
 {
-    const bool suggestions = suggestionsView();
-    m_views->setCurrentIndex(suggestions ? 1 : 0);
-    m_statusRow->setVisible(!suggestions); // summary and "Only changed blocks" belong to the diff
-    m_copyButton->setVisible(!suggestions);
-    m_revertButton->setVisible(!suggestions);
-    m_applyButton->setVisible(!suggestions);
+    const bool measured = m_measuredButton->isChecked();
+    const bool diff = !suggestionsView() && !measured;
+    m_views->setCurrentIndex(diff ? 0 : (measured ? 2 : 1));
+    m_statusRow->setVisible(diff); // summary and "Only changed blocks" belong to the diff
+    m_copyButton->setVisible(diff);
+    m_revertButton->setVisible(diff);
+    m_applyButton->setVisible(diff);
     updateState();
 }
 
@@ -521,6 +544,7 @@ void ReorderDock::analyze()
     reorder::AnalysisOptions options;
     options.variant = currentVariant();
     options.windowSize = m_windowSpin->value();
+    options.slidingWindows = m_windowModeCombo->currentIndex() == 0;
     m_analyzedText = edit->toPlainText();
     m_result = std::make_shared<const reorder::AnalysisResult>(
         reorder::analyzeProgram(m_analyzedText.toStdString(), options));
@@ -528,15 +552,17 @@ void ReorderDock::analyze()
     m_diffView->setPlaceholderText(m_result->ok ? tr("There is nothing to show for this program.")
                                                 : QString::fromStdString(m_result->error));
     m_diffView->setResult(m_result);
+    m_measured->setAnalysis(m_result);
     scrollToFirstChange();
     showDetails(QString());
     updateState();
 
     // the Suggestions view analyzes the same code for the same pipeline and window
-    scheduler::Options suggestionOptions;
+    suggestions::Options suggestionOptions;
     suggestionOptions.forwarding = reorder::hasForwarding(options.variant);
     suggestionOptions.hazardUnit = reorder::hasHazardUnit(options.variant);
     suggestionOptions.window = options.windowSize;
+    suggestionOptions.slidingWindows = options.slidingWindows;
     m_suggestions->setOptions(suggestionOptions);
     m_suggestions->analyze();
 }
@@ -870,9 +896,9 @@ void ReorderDock::updateState()
         m_bannerLabel->setText(messages.join(QStringLiteral("<br>")));
         m_bannerLabel->show();
     }
-    if (suggestionsView())
+    if (suggestionsView() || m_measuredButton->isChecked())
     {
-        m_bannerLabel->hide(); // its messages describe the diff; the Suggestions view shows its own
+        m_bannerLabel->hide(); // its messages describe the diff; the other views show their own
     }
 }
 

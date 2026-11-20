@@ -6,12 +6,19 @@
  * For every basic block, cut into windows of W instructions:
  *   1. build the DAG of the window                           (dag.c)
  *   2. make one schedule with each rule: height, succ        (list_schedule)
- *   3. count the stalls of the original order and of the two
- *      schedules; keep the one with the fewest stalls (most savings).
- *      On a tie keep the one with the smallest swap length
- *      (sum of |new position - original position|).
- *      If that also ties, the earlier one is kept, in the order
- *      original, height, succ. So with no savings the code is unchanged.
+ *      and the same two again with the cross-block precaution: producers
+ *      that the next block's first lines read get a higher height (dag.c)
+ *   3. compare the current order and the four schedules; keep the one with
+ *        a. the fewest stalls inside the block (window + rest of the block)
+ *        b. on a tie, the fewest stalls in the next block's first lines
+ *           (cross-block: only decides between orders that are equally good
+ *           inside the block, so it never costs a stall inside the block)
+ *        c. on a tie, the smallest swap length
+ *           (sum of |new position - original position|)
+ *      If that also ties, the earlier one is kept (current order first),
+ *      so with no savings the code is unchanged.
+ * The windows move through the block in one of two ways (option -a,
+ * see commit_count): slide (default) or fixed.
  *
  * Checking that the new order is correct is a separate program (verify.c).
  */
@@ -90,7 +97,7 @@ void list_schedule(Program *p, Dag *g, int start_slot, int priority, int result[
         /* place it */
         result[k] = best;
         placed[best] = 1;
-        slot = best_start + p->ins[g->node[best]].size;
+        slot = best_start + g->occ[best];
 
         /* its successors: one predecessor less, maybe a later earliest slot */
         for (i = 0; i < n; i++) {
@@ -105,21 +112,36 @@ void list_schedule(Program *p, Dag *g, int start_slot, int priority, int result[
 
 /*
  * Stalls if the window is issued in order perm[], followed by the rest of
- * the block (rest_start .. block_end-1) in original order.
- * Works on a copy of the state, so *st is not changed.
+ * the block (rest_start .. block_end-1) in original order. Returns those
+ * stalls (inside the block). *next_stalls = stalls of the next block's first
+ * lines (1 with fwd, 2 without), which this block's end can still cause
+ * (cross-block look-ahead; the next block is not scheduled yet, so its
+ * original order is used). Works on a copy of the state: *st is not changed.
  */
 int count_window_stalls(Program *p, HazardModel *m, PipeState *st, Dag *g,
-                        int perm[], int rest_start, int block_end)
+                        int perm[], int rest_start, int block_end, int *next_stalls)
 {
     PipeState copy;
     int k;
     int stalls = 0;
+    int after = 0;
 
     copy_state(&copy, st);
     for (k = 0; k < g->n; k++)
         stalls = stalls + issue(p, m, &copy, g->node[perm[k]]);
+    /* positions after the window have not been touched yet: they are
+       still in the original order, so position k holds instruction k */
     for (k = rest_start; k < block_end; k++)
         stalls = stalls + issue(p, m, &copy, k);
+
+    /* the next block's first lines (not scheduled yet: original order).
+       After j / jr / ret, issue() has cleared the state, so they add 0. */
+    for (k = block_end; k < block_end + lookahead_lines(m) && k < p->nins; k++) {
+        after = after + issue(p, m, &copy, k);
+        if (p->ins[k].is_uncond == 1)
+            break;
+    }
+    *next_stalls = after;
     return stalls;
 }
 
@@ -141,18 +163,44 @@ int swap_length(int perm[], int n)
 }
 
 /*
+ * How many instructions of a window are kept for good before the next
+ * window starts (the rest are scheduled again by the next window).
+ *   fixed:   all W  -> next window starts right after this one
+ *   slide:   1      -> next window starts one position later
+ */
+int commit_count(Options *opt)
+{
+    if (opt->win_mode == WIN_SLIDE)
+        return 1;
+    return opt->window;
+}
+
+/*
  * Schedule the whole program.
  * order[k] = instruction placed at position k.
+ *
+ * order[] starts as the original order and is changed in place. For each
+ * block, a window covers positions pos .. pos+W-1 of the CURRENT order:
+ *   1. build the DAG of those instructions (in their current order)
+ *   2. make the height and the succ schedule (list_schedule)
+ *   3. keep the best of: current order, height, succ
+ *      (fewest stalls, then smallest swap length, then the earlier one)
+ *   4. write it back into order[], keep the first commit_count() positions
+ *      for good (issue them into the pipeline state) and move pos on.
+ * With the fixed mode every position is kept at once, so each window is
+ * scheduled exactly once (the original algorithm).
  */
 void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
 {
     PipeState st;
     Dag g;
     int nodes[MAX_WIN];
-    int cand[3][MAX_WIN];       /* cand[0] = original order, cand[1] = height, cand[2] = succ */
-    int b, k, c, n;
-    int block_start, block_end;
-    int ws, we;                 /* window = instructions ws .. we-1 */
+    Dag g2;                     /* the same window with the cross-block heights */
+    int cand[5][MAX_WIN];       /* current, height, succ, height+cb, succ+cb      */
+    int nb, best_next;          /* stalls in the next block's first lines        */
+    int b, k, c, n, keep;
+    int block_end;
+    int pos, we;                /* window = positions pos .. we-1 of order[] */
     int best, best_stalls, best_len, s, len;
 
     for (k = 0; k < p->nins; k++)
@@ -163,46 +211,60 @@ void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
     reset_state(&st);
 
     for (b = 0; b < p->nblocks; b++) {
-        block_start = p->blocks[b].start;
         block_end = p->blocks[b].end;
+        pos = p->blocks[b].start;
 
-        for (ws = block_start; ws < block_end; ws = ws + opt->window) {
-            we = ws + opt->window;
+        while (pos < block_end) {
+            we = pos + opt->window;
             if (we > block_end)
                 we = block_end;
-            n = we - ws;
+            n = we - pos;
 
             for (k = 0; k < n; k++)
-                nodes[k] = ws + k;
-            build_dag(p, m, &st, nodes, n, &g);
+                nodes[k] = order[pos + k];
+            build_dag(p, m, &st, nodes, n, &g, we, -1);
+            build_dag(p, m, &st, nodes, n, &g2, we, block_end);
 
-            /* candidate 0: original order */
+            /* candidate 0: the current order */
             for (k = 0; k < n; k++)
                 cand[0][k] = k;
 
-            /* candidate 1: height rule, candidate 2: succ rule */
+            /* candidates 1, 2: height and succ rule (as in P-1);
+               candidates 3, 4: the same with the cross-block precaution */
             list_schedule(p, &g, st.next_slot, PRIO_HEIGHT, cand[1]);
             list_schedule(p, &g, st.next_slot, PRIO_SUCC, cand[2]);
+            list_schedule(p, &g2, st.next_slot, PRIO_HEIGHT, cand[3]);
+            list_schedule(p, &g2, st.next_slot, PRIO_SUCC, cand[4]);
 
-            /* keep the best: fewest stalls, then smallest swap length */
+            /* keep the best: fewest stalls inside the block, then fewest
+               stalls at the next block's start, then smallest swap length */
             best = 0;
-            best_stalls = count_window_stalls(p, m, &st, &g, cand[0], we, block_end);
+            best_stalls = count_window_stalls(p, m, &st, &g, cand[0], we, block_end, &best_next);
             best_len = 0;
-            for (c = 1; c <= 2; c++) {
-                s = count_window_stalls(p, m, &st, &g, cand[c], we, block_end);
+            for (c = 1; c <= 4; c++) {
+                s = count_window_stalls(p, m, &st, &g, cand[c], we, block_end, &nb);
                 len = swap_length(cand[c], n);
-                if (s < best_stalls || (s == best_stalls && len < best_len)) {
+                if (s < best_stalls || (s == best_stalls && nb < best_next) ||
+                    (s == best_stalls && nb == best_next && len < best_len)) {
                     best = c;
                     best_stalls = s;
+                    best_next = nb;
                     best_len = len;
                 }
             }
 
-            /* write the window into order[] and advance the pipeline state */
-            for (k = 0; k < n; k++) {
-                order[ws + k] = nodes[cand[best][k]];
-                issue(p, m, &st, order[ws + k]);
-            }
+            /* write the window back into order[] */
+            for (k = 0; k < n; k++)
+                order[pos + k] = nodes[cand[best][k]];
+
+            /* keep the first positions for good; the last window of a block
+               keeps everything */
+            keep = commit_count(opt);
+            if (we == block_end || keep > n)
+                keep = n;
+            for (k = 0; k < keep; k++)
+                issue(p, m, &st, order[pos + k]);
+            pos = pos + keep;
         }
     }
 }

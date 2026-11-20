@@ -55,6 +55,28 @@ int find_char(char s[], char c)
     return -1;
 }
 
+/* 1 if s starts with word, e.g. starts_with(".data 5", ".data") = 1. */
+int starts_with(char s[], char word[])
+{
+    int i;
+    for (i = 0; word[i] != '\0'; i++) {
+        if (s[i] != word[i])
+            return 0;
+    }
+    return 1;
+}
+
+/* 1 if word appears anywhere in s. */
+int contains(char s[], char word[])
+{
+    int i;
+    for (i = 0; s[i] != '\0'; i++) {
+        if (starts_with(&s[i], word))
+            return 1;
+    }
+    return 0;
+}
+
 /* Add src at the end of dst (dst never gets longer than MAX_TEXT-1 characters). */
 void append(char dst[], char src[])
 {
@@ -205,6 +227,14 @@ void decode_operands(Instr *in, OpInfo *op, char w[][MAX_WORD], int nops)
         set_rd(in, w[1]);
         add_src(in, w[2]);
         add_src(in, w[3]);
+        break;
+
+    case FMT_R4:                                  /* fmadd.s rd, rs1, rs2, rs3 */
+        if (nops < 4) break;
+        set_rd(in, w[1]);
+        add_src(in, w[2]);
+        add_src(in, w[3]);
+        add_src(in, w[4]);
         break;
 
     case FMT_I:                                   /* addi rd, rs1, imm */
@@ -402,6 +432,7 @@ int read_program(char filename[], Program *p)
     char text[MAX_TEXT];
     int line_no = 0;
     int new_block = 1;
+    int in_data = 0;        /* 1 between .data and .text: only data there */
     int len, hash, colon, i;
 
     f = fopen(filename, "r");
@@ -432,6 +463,29 @@ int read_program(char filename[], Program *p)
         /* blank or comment-only line */
         if (code[0] == '\0') {
             add_text_line(p, line);
+            continue;
+        }
+
+        /* section directives: .text = code, .data/.rodata/.bss/.sdata = data */
+        if (starts_with(code, ".text"))
+            in_data = 0;
+        else if (starts_with(code, ".data") || starts_with(code, ".rodata") ||
+                 starts_with(code, ".bss") || starts_with(code, ".sdata"))
+            in_data = 1;
+        else if (starts_with(code, ".section")) {
+            if (contains(code, ".text"))
+                in_data = 0;
+            else
+                in_data = 1;
+        }
+
+        /* inside a data section every line is data, e.g. the second line of
+               .word 1, 2,
+                     3, 4
+           so it is printed back as it is and never read as an instruction */
+        if (in_data == 1) {
+            add_text_line(p, line);
+            new_block = 1;
             continue;
         }
 
@@ -490,8 +544,11 @@ int read_program(char filename[], Program *p)
  * Print the program to out (a file, or stdout for the screen).
  * order[k] = instruction placed at position k.
  * If with_nops is 1, print nops[i] nops before instruction i.
+ * inner[i] = stalls inside instruction i itself (la, big li, call: the
+ * second half waits for the first). They cannot be filled with nops in
+ * the file, so only a comment is written after the instruction.
  */
-void write_program(FILE *out, Program *p, int order[], int nops[], int with_nops)
+void write_program(FILE *out, Program *p, int order[], int nops[], int inner[], int with_nops)
 {
     int i, j, idx;
     int k = 0;      /* position in order[] */
@@ -506,6 +563,9 @@ void write_program(FILE *out, Program *p, int order[], int nops[], int with_nops
                     fprintf(out, "    nop                 # inserted: hazard\n");
             }
             fprintf(out, "%s\n", p->ins[idx].text);
+            if (with_nops == 1 && inner[idx] > 0)
+                fprintf(out, "    # note: %d stall(s) inside the line above (its 2nd half waits for its 1st half)\n",
+                        inner[idx]);
             k++;
         }
     }

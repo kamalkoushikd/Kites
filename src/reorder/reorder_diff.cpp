@@ -100,7 +100,9 @@ std::string nopText(const Context &ctx, int slot)
     std::string text = indent + "nop";
     if (wait.reg >= 0)
     {
-        text += "    # wait for " + std::string(reg_names[wait.reg]) + (ctx.forwarding ? " (load-use)" : " (no forwarding)");
+        char name[MAX_WORD];
+        reg_name(wait.reg, name);
+        text += "    # wait for " + std::string(name) + (ctx.forwarding ? " (load-use)" : " (no forwarding)");
     }
     bool crlf = false;
     for (const LineInfo &info : ctx.lines)
@@ -541,6 +543,11 @@ void buildDiff(Context &ctx, AnalysisResult &result)
                 cell.tooltipHtml = waitTooltip(ctx, instruction, true);
                 cell.related = {wait.producer};
             }
+            else if (ctx.hazardUnit && wait.inner > 0)
+            {
+                cell.badge = "waits " + plural(wait.inner, "cycle") + " inside";
+                cell.tooltipHtml = innerStallTooltip(ctx, instruction);
+            }
             else if (ctx.waitBefore[instruction].stalls > 0)
             {
                 const Wait &before = ctx.waitBefore[instruction];
@@ -691,6 +698,11 @@ void buildDiff(Context &ctx, AnalysisResult &result)
                     ctx.hazardUnit ? waitTooltip(ctx, instruction, false) : missingNopTooltip(ctx, instruction);
                 cell.related = {wait.producer};
             }
+            else if (ctx.hazardUnit && wait.inner > 0)
+            {
+                cell.badge = "waits " + plural(wait.inner, "cycle") + " inside";
+                cell.tooltipHtml = innerStallTooltip(ctx, instruction);
+            }
             left.push_back(placed);
         }
         else if (info.strippedNop)
@@ -771,8 +783,8 @@ void buildDiff(Context &ctx, AnalysisResult &result)
             {
                 if (ctx.hazardUnit)
                 {
-                    segment.stallsBefore += ctx.waitBefore[k].stalls;
-                    segment.stallsAfter += ctx.waitAfter[k].stalls;
+                    segment.stallsBefore += ctx.waitBefore[k].stalls + ctx.waitBefore[k].inner;
+                    segment.stallsAfter += ctx.waitAfter[k].stalls + ctx.waitAfter[k].inner;
                 }
                 else
                 {
@@ -824,8 +836,9 @@ void buildDiff(Context &ctx, AnalysisResult &result)
     result.blockCount = p->nblocks;
     for (int i = 0; i < count; ++i)
     {
-        result.stallsBefore += ctx.waitBefore[i].stalls;
-        result.stallsAfter += ctx.waitAfter[i].stalls;
+        // stalls inside la / big li / call (no forwarding) are real cycles too, as in the tool's totals
+        result.stallsBefore += ctx.waitBefore[i].stalls + ctx.waitBefore[i].inner;
+        result.stallsAfter += ctx.waitAfter[i].stalls + ctx.waitAfter[i].inner;
         if (noHazardUnit)
         {
             result.missingNops += ctx.waitStudent[i].stalls;

@@ -2,16 +2,21 @@
  * @file reorder_analysis.cpp
  * @brief Runs the list scheduler on editor text and records why it moved each instruction.
  *
+ * All scheduling and timing comes from the list scheduler in external/list_scheduler
+ * (plain C, an unchanged copy of the project's tool). This file only calls its public
+ * functions: read_program, schedule_program, issue, stall_producer, build_dag. To update
+ * the scheduler, copy its new files over the old ones; nothing here copies its loops.
+ *
  * Steps (see analyzeProgram at the bottom):
  *   1. prepare()        editor text -> scheduler Program (temp file + read_program),
  *                       instructions whose operands the scheduler might misread become
  *                       fixed barriers
- *   2. schedule()       schedule_program() for the order, plus a traced copy of its loop
- *                       that keeps every window's DAG and candidates for the explanations
+ *   2. schedule()       schedule_program() for the new order
  *   3. keepsMeaning()   independent check that every block computes the same values
- *   4. computeWaits()   why each instruction waits, in the old and the new order
- *   5. computeNopGaps() no-hazard-unit pipelines: which NOPs the new code needs
- *   6. computeMoves()   which lines count as moved (weighted LIS) and why (counterfactual)
+ *   4. computeDeps()    which instructions must stay in order (build_dag), for the explanations
+ *   5. computeWaits()   why each instruction waits, in the old and the new order
+ *   6. computeNopGaps() no-hazard-unit pipelines: which NOPs the new code needs
+ *   7. computeMoves()   which lines count as moved (weighted LIS) and why (counterfactual)
  */
 #include "reorder_internal.h"
 
@@ -80,6 +85,17 @@ int blockEnd(const Context &ctx, int block)
 int originalLineOf(const Context &ctx, int instruction)
 {
     return ctx.program->ins[instruction].line_no;
+}
+
+bool dependsOn(const Context &ctx, int earlier, int later)
+{
+    if (earlier < 0 || later < 0 || earlier >= later || ctx.blockOf[earlier] != ctx.blockOf[later])
+    {
+        return false;
+    }
+    const int block = ctx.blockOf[earlier];
+    const int start = blockStart(ctx, block);
+    return ctx.deps[block][earlier - start][later - start] != 0;
 }
 
 bool nopIsKept(const Context &ctx, int line)
@@ -191,10 +207,14 @@ bool operandsUnderstood(Instr *in)
     const int operandCount = split_words(code, words) - 1;
     auto isRegister = [&](int k) { return k >= 1 && k <= operandCount && reg_number(words[k]) >= 0; };
 
+    // FP instructions may end with a rounding mode (rne, rtz, dyn, ...), which is not a register
     switch (op.format)
     {
     case FMT_R:
-        return operandCount == 3 && isRegister(1) && isRegister(2) && isRegister(3);
+        return (operandCount == 3 || operandCount == 4) && isRegister(1) && isRegister(2) && isRegister(3);
+    case FMT_R4:
+        return (operandCount == 4 || operandCount == 5) && isRegister(1) && isRegister(2) && isRegister(3) &&
+               isRegister(4);
     case FMT_I:
         return operandCount == 3 && isRegister(1) && isRegister(2);
     case FMT_LOAD:
@@ -211,7 +231,7 @@ bool operandsUnderstood(Instr *in)
     case FMT_JAL:
         return operandCount == 1 || (operandCount == 2 && isRegister(1));
     case FMT_RD_RS:
-        return operandCount == 2 && isRegister(1) && isRegister(2);
+        return (operandCount == 2 || operandCount == 3) && isRegister(1) && isRegister(2);
     case FMT_NONE:
     case FMT_ECALL:
     case FMT_RET:
@@ -225,6 +245,28 @@ bool operandsUnderstood(Instr *in)
     default:
         return false;
     }
+}
+
+/// read_program() treats every line between .data (.rodata, .bss, .sdata) and .text as data,
+/// e.g. the continuation line of a .word list. Mirrors its rule: returns the new state.
+bool updateDataSection(const std::string &line, bool inData)
+{
+    const size_t hash = line.find('#');
+    const std::string code = trim(hash == std::string::npos ? line : line.substr(0, hash));
+    auto startsWith = [&](const char *word) { return code.rfind(word, 0) == 0; };
+    if (startsWith(".text"))
+    {
+        return false;
+    }
+    if (startsWith(".data") || startsWith(".rodata") || startsWith(".bss") || startsWith(".sdata"))
+    {
+        return true;
+    }
+    if (startsWith(".section"))
+    {
+        return code.find(".text") == std::string::npos;
+    }
+    return inData;
 }
 
 std::filesystem::path makeTempPath()
@@ -394,6 +436,7 @@ bool prepare(Context &ctx, const std::string &source, std::string &error)
     std::vector<int> extraLabelLines;
     int expectedInstructions = 0;
     int expectedEntries = 0;
+    bool inData = false;
     ctx.lines.resize(raw.size());
     for (size_t i = 0; i < raw.size(); ++i)
     {
@@ -423,6 +466,11 @@ bool prepare(Context &ctx, const std::string &source, std::string &error)
             extraLabelLines.push_back(static_cast<int>(i));
         }
         LineParse parse = parseLine(line);
+        inData = updateDataSection(line, inData);
+        if (inData && !parse.blankOrComment)
+        {
+            parse = LineParse{}; // data, printed back as it is
+        }
         if (parse.instruction && !ctx.hazardUnit && parse.code == "nop")
         {
             info.strippedNop = true;
@@ -512,23 +560,21 @@ bool prepare(Context &ctx, const std::string &source, std::string &error)
         }
         if (std::strcmp(in->mnem, "li") == 0)
         {
-            // the scheduler guesses 2 slots for every large immediate; use what Kites emits
-            char text[MAX_TEXT];
-            std::strncpy(text, in->code, MAX_TEXT - 1);
-            text[MAX_TEXT - 1] = '\0';
-            char words[MAX_WORDS][MAX_WORD];
-            if (split_words(text, words) == 3)
+            // the scheduler guesses 2 slots for every large immediate; use what Kites emits.
+            // The value is read from the whole line: the scheduler keeps only MAX_WORD - 1
+            // characters of a word, which cuts long binary literals.
+            const std::string code = in->code;
+            const size_t comma = code.rfind(',');
+            const std::string operand = comma == std::string::npos ? std::string() : trim(code.substr(comma + 1));
+            char *end = nullptr;
+            errno = 0;
+            const long long value = std::strtoll(operand.c_str(), &end, 0);
+            if (!operand.empty() && end != operand.c_str() && *end == '\0' && errno == 0)
             {
-                char *end = nullptr;
-                errno = 0;
-                const long long value = std::strtoll(words[2], &end, 0);
-                if (end != words[2] && *end == '\0' && errno == 0)
+                const int count = liInstructionCount(value);
+                if (count > 0)
                 {
-                    const int count = liInstructionCount(value);
-                    if (count > 0)
-                    {
-                        in->size = count;
-                    }
+                    in->size = count;
                 }
             }
         }
@@ -605,58 +651,80 @@ bool prepare(Context &ctx, const std::string &source, std::string &error)
     return true;
 }
 
-/// Same timing as issue() in hazard.c. With allowStall == false the instruction
-/// enters at once (no hazard unit) and stalls reports the slots that are missing.
-Wait replay(Program *p, HazardModel *m, PipeState *st, int i, bool allowStall)
+/// Issue instruction i with the scheduler's timing (issue() in hazard.c) and record why it waits
+/// (stall_producer()). Call it in program order on one PipeState.
+Wait issueAndRecord(Program *p, HazardModel *m, PipeState *st, int i)
 {
-    Instr *in = &p->ins[i];
     Wait wait;
-    int ready = st->next_slot;
-    for (int k = 0; k < in->nsrc; ++k)
+    wait.producer = stall_producer(p, m, st, i);
+    const Instr &in = p->ins[i];
+    for (int k = 0; k < in.nsrc && wait.producer >= 0; ++k)
     {
-        const int r = in->src[k];
-        if (st->writer[r] != -1)
+        if (st->writer[in.src[k]] == wait.producer)
         {
-            const int regReady = st->slot[r] + required_gap(p, m, st->writer[r]);
-            if (regReady > ready)
-            {
-                ready = regReady;
-                wait.producer = st->writer[r];
-                wait.reg = r;
-            }
+            wait.reg = in.src[k];
+            break;
         }
     }
-    wait.stalls = ready - st->next_slot;
-    const int start = allowStall ? ready : st->next_slot;
-    wait.startSlot = start;
-    if (in->rd > 0)
-    {
-        st->writer[in->rd] = i;
-        st->slot[in->rd] = start + in->size - 1;
-    }
-    st->next_slot = start + in->size;
-    if (in->is_uncond == 1)
-    {
-        for (int r = 0; r < 32; ++r)
-        {
-            st->writer[r] = -1;
-        }
-    }
+    const int slotBefore = st->next_slot;
+    const int total = issue(p, m, st, i);
+    wait.inner = inner_stalls(p, m, i);
+    wait.stalls = total - wait.inner;
+    wait.startSlot = slotBefore + wait.stalls;
     return wait;
+}
+
+/// No hazard unit: the instruction enters at once, whatever it reads. Returns how long it
+/// should have waited. (issue() with its sources hidden for a moment, so it does not wait.)
+Wait enterWithoutWaiting(Program *p, HazardModel *m, PipeState *st, int i)
+{
+    PipeState probe;
+    copy_state(&probe, st);
+    Wait wait = issueAndRecord(p, m, &probe, i);
+    wait.startSlot = st->next_slot;
+    Instr *in = &p->ins[i];
+    const int sources = in->nsrc;
+    in->nsrc = 0;
+    issue(p, m, st, i);
+    in->nsrc = sources;
+    return wait;
+}
+
+/// Wait of every instruction when the whole program runs in `order` (order[k] = instruction).
+std::vector<Wait> waitsInOrder(Context &ctx, const std::vector<int> &order)
+{
+    std::vector<Wait> waits(order.size());
+    PipeState state;
+    reset_state(&state);
+    for (int instruction : order)
+    {
+        waits[instruction] = issueAndRecord(ctx.program.get(), &ctx.model, &state, instruction);
+    }
+    return waits;
+}
+
+int totalStalls(const std::vector<Wait> &waits)
+{
+    int total = 0;
+    for (const Wait &wait : waits)
+    {
+        total += wait.stalls + wait.inner;
+    }
+    return total;
 }
 
 struct Sequence
 {
     std::vector<std::array<int, MAX_SRC>> sourceWriter; ///< per position
     std::vector<int> baseWriter;                        ///< per position
-    std::array<int, 32> finalWriter{};
+    std::array<int, NREGS> finalWriter{};
 };
 
 /// Which instruction each register value comes from, inside one block.
 Sequence analyseSequence(const Program *p, const std::vector<int> &sequence)
 {
     Sequence result;
-    std::array<int, 32> lastWriter;
+    std::array<int, NREGS> lastWriter;
     lastWriter.fill(-1);
     for (int instruction : sequence)
     {
@@ -755,96 +823,12 @@ void schedule(Context &ctx)
 
     ::Options options{};
     options.window = ctx.options.windowSize;
+    options.win_mode = ctx.options.slidingWindows ? WIN_SLIDE : WIN_FIXED;
     options.reorder = 1;
     options.insert_nops = 0;
-    std::vector<int> official(static_cast<size_t>(std::max(count, 1)), 0);
-    schedule_program(p, &ctx.model, &options, official.data());
-    official.resize(static_cast<size_t>(count));
-
-    // The same loop as schedule_program() in sched.c, keeping what it looked at.
-    std::vector<int> traced(static_cast<size_t>(count), 0);
-    ctx.windowOf.assign(static_cast<size_t>(count), -1);
-    ctx.windows.clear();
-    PipeState state;
-    reset_state(&state);
-    for (int b = 0; b < p->nblocks; ++b)
-    {
-        const int start = p->blocks[b].start;
-        const int end = p->blocks[b].end;
-        for (int ws = start; ws < end; ws += options.window)
-        {
-            const int we = std::min(ws + options.window, end);
-            const int n = we - ws;
-            int nodes[MAX_WIN];
-            for (int k = 0; k < n; ++k)
-            {
-                nodes[k] = ws + k;
-            }
-
-            WindowTrace trace;
-            trace.block = b;
-            trace.start = ws;
-            trace.end = we;
-            trace.blockEnd = end;
-            copy_state(&trace.before, &state);
-            auto dag = std::make_shared<Dag>();
-            build_dag(p, &ctx.model, &state, nodes, n, dag.get());
-
-            int candidate[3][MAX_WIN];
-            for (int k = 0; k < n; ++k)
-            {
-                candidate[0][k] = k;
-            }
-            list_schedule(p, dag.get(), state.next_slot, PRIO_HEIGHT, candidate[1]);
-            list_schedule(p, dag.get(), state.next_slot, PRIO_SUCC, candidate[2]);
-
-            int best = 0;
-            int bestStalls = count_window_stalls(p, &ctx.model, &state, dag.get(), candidate[0], we, end);
-            int bestLength = 0;
-            trace.stalls[0] = bestStalls;
-            for (int c = 1; c <= 2; ++c)
-            {
-                const int stalls = count_window_stalls(p, &ctx.model, &state, dag.get(), candidate[c], we, end);
-                const int length = swap_length(candidate[c], n);
-                trace.stalls[c] = stalls;
-                trace.length[c] = length;
-                if (stalls < bestStalls || (stalls == bestStalls && length < bestLength))
-                {
-                    best = c;
-                    bestStalls = stalls;
-                    bestLength = length;
-                }
-            }
-            trace.chosen = best;
-            for (int c = 0; c < 3; ++c)
-            {
-                trace.candidate[c].assign(candidate[c], candidate[c] + n);
-            }
-            if (n >= 2)
-            {
-                trace.dag = dag;
-            }
-
-            for (int k = 0; k < n; ++k)
-            {
-                traced[ws + k] = nodes[candidate[best][k]];
-                issue(p, &ctx.model, &state, traced[ws + k]);
-            }
-            const int windowIndex = static_cast<int>(ctx.windows.size());
-            for (int k = ws; k < we; ++k)
-            {
-                ctx.windowOf[k] = windowIndex;
-            }
-            ctx.windows.push_back(std::move(trace));
-        }
-    }
-    ctx.traceValid = traced == official;
-    ctx.order = official;
-    if (!ctx.traceValid)
-    {
-        ctx.notes.push_back("Internal note: the explanation trace differs from the scheduler's result, "
-                            "so the reasons for moves are not shown.");
-    }
+    ctx.order.assign(static_cast<size_t>(std::max(count, 1)), 0);
+    schedule_program(p, &ctx.model, &options, ctx.order.data());
+    ctx.order.resize(static_cast<size_t>(count));
 
     for (int b = 0; b < p->nblocks; ++b)
     {
@@ -868,6 +852,39 @@ void schedule(Context &ctx)
     }
 }
 
+/// deps[b][u][v]: the scheduler's dependence graph (build_dag) of each block in its original
+/// order. One graph per start position, so pairs up to MAX_WIN apart are exact; pairs further
+/// apart are taken as dependent (only the explanations use this).
+void computeDeps(Context &ctx)
+{
+    Program *p = ctx.program.get();
+    ctx.deps.assign(static_cast<size_t>(p->nblocks), {});
+    auto dag = std::make_unique<Dag>();
+    PipeState empty;
+    reset_state(&empty);
+    int nodes[MAX_WIN];
+    for (int b = 0; b < p->nblocks; ++b)
+    {
+        const int start = p->blocks[b].start;
+        const int count = p->blocks[b].end - start;
+        auto &deps = ctx.deps[b];
+        deps.assign(static_cast<size_t>(count), std::vector<unsigned char>(static_cast<size_t>(count), 1));
+        for (int u = 0; u < count; ++u)
+        {
+            const int span = std::min(count - u, MAX_WIN);
+            for (int k = 0; k < span; ++k)
+            {
+                nodes[k] = start + u + k;
+            }
+            build_dag(p, &ctx.model, &empty, nodes, span, dag.get(), start + u + span, -1);
+            for (int k = 1; k < span; ++k)
+            {
+                deps[u][u + k] = dag->edge[0][k] != -1 ? 1 : 0;
+            }
+        }
+    }
+}
+
 void computeWaits(Context &ctx)
 {
     Program *p = ctx.program.get();
@@ -878,7 +895,7 @@ void computeWaits(Context &ctx)
     reset_state(&state);
     for (int k = 0; k < count; ++k)
     {
-        ctx.waitBefore[k] = replay(p, &ctx.model, &state, k, true);
+        ctx.waitBefore[k] = issueAndRecord(p, &ctx.model, &state, k);
     }
     ctx.finalSlotBefore = state.next_slot;
 
@@ -886,7 +903,7 @@ void computeWaits(Context &ctx)
     reset_state(&state);
     for (int k = 0; k < count; ++k)
     {
-        ctx.waitAfter[ctx.order[k]] = replay(p, &ctx.model, &state, ctx.order[k], true);
+        ctx.waitAfter[ctx.order[k]] = issueAndRecord(p, &ctx.model, &state, ctx.order[k]);
     }
     ctx.finalSlotAfter = state.next_slot;
 }
@@ -957,8 +974,8 @@ void computeNopGaps(Context &ctx)
         const int nops = static_cast<int>(ctx.gaps[k].studentLines.size());
         state.next_slot += nops;
         counting.next_slot += nops;
-        const Wait timing = replay(p, &ctx.model, &state, k, false);
-        ctx.waitStudent[k] = replay(p, &ctx.model, &counting, k, true);
+        const Wait timing = enterWithoutWaiting(p, &ctx.model, &state, k);
+        ctx.waitStudent[k] = issueAndRecord(p, &ctx.model, &counting, k);
         ctx.waitStudent[k].startSlot = timing.startSlot;
     }
     state.next_slot += static_cast<int>(ctx.gaps[count].studentLines.size());
@@ -1009,97 +1026,72 @@ void computeNopGaps(Context &ctx)
     for (int k = 0; k < count; ++k)
     {
         state.next_slot += ctx.gaps[k].total();
-        ctx.rightStart[ctx.order[k]] = replay(p, &ctx.model, &state, ctx.order[k], false).startSlot;
+        ctx.rightStart[ctx.order[k]] = enterWithoutWaiting(p, &ctx.model, &state, ctx.order[k]).startSlot;
     }
     ctx.finalSlotRight = state.next_slot + trailing.kept;
 }
 
-/// Stalls of every instruction of a window (in the order perm) and of the rest of its block.
-std::vector<Wait> replayWindow(Context &ctx, const WindowTrace &window, const std::vector<int> &perm)
+/**
+ * Why one instruction moved. Counterfactual: take the new order, put only this
+ * instruction back as close to its old place as the dependences allow, and count
+ * the stalls of the whole program again (the scheduler's own timing).
+ */
+void explainMove(Context &ctx, MoveInfo &move, int stallsChosen)
 {
-    Program *p = ctx.program.get();
-    std::vector<Wait> waits(static_cast<size_t>(window.blockEnd - window.start));
-    PipeState state;
-    copy_state(&state, const_cast<PipeState *>(&window.before));
-    for (int node : perm)
-    {
-        const int instruction = window.start + node;
-        waits[node] = replay(p, &ctx.model, &state, instruction, true);
-    }
-    for (int instruction = window.end; instruction < window.blockEnd; ++instruction)
-    {
-        waits[instruction - window.start] = replay(p, &ctx.model, &state, instruction, true);
-    }
-    return waits;
-}
-
-void explainMove(Context &ctx, MoveInfo &move)
-{
-    if (!ctx.traceValid)
-    {
-        return;
-    }
-    Program *p = ctx.program.get();
     const int instruction = move.instruction;
-    const WindowTrace &window = ctx.windows[ctx.windowOf[instruction]];
-    if (!window.dag)
-    {
-        return;
-    }
-    const Dag &dag = *window.dag;
-    const int count = window.end - window.start;
-    const std::vector<int> &perm = window.candidate[window.chosen];
-    const int node = instruction - window.start;
+    const int start = blockStart(ctx, move.block);
+    const int end = blockEnd(ctx, move.block);
+    const int count = end - start;
 
-    std::vector<int> position(static_cast<size_t>(count), 0);
-    for (int k = 0; k < count; ++k)
+    std::vector<int> position(static_cast<size_t>(count), 0); // new position inside the block
+    for (int k = start; k < end; ++k)
     {
-        position[perm[k]] = k;
+        position[ctx.order[k] - start] = k - start;
     }
-    const int current = position[node];
+    const int current = position[instruction - start];
+    auto mustStayOrdered = [&](int a, int b) { return a < b ? dependsOn(ctx, a, b) : dependsOn(ctx, b, a); };
 
     // Instructions whose order with it changed: it passed them.
-    for (int v = 0; v < count; ++v)
+    for (int other = start; other < end; ++other)
     {
-        if (v != node && (v < node) != (position[v] < current))
+        if (other != instruction && (other < instruction) != (position[other - start] < current))
         {
-            move.passed.push_back(window.start + v);
+            move.passed.push_back(other);
         }
     }
 
     // The nearest dependence in the direction it moved.
     const bool movedUp = move.toPos < move.fromPos;
     int limitPosition = movedUp ? -1 : INT_MAX;
-    for (int v = 0; v < count; ++v)
+    for (int other = start; other < end; ++other)
     {
-        if (movedUp && dag.edge[v][node] != -1 && position[v] > limitPosition)
+        const int at = position[other - start];
+        if (movedUp && other < instruction && dependsOn(ctx, other, instruction) && at > limitPosition)
         {
-            limitPosition = position[v];
-            move.limit = window.start + v;
+            limitPosition = at;
+            move.limit = other;
         }
-        if (!movedUp && dag.edge[node][v] != -1 && position[v] < limitPosition)
+        if (!movedUp && other > instruction && dependsOn(ctx, instruction, other) && at < limitPosition)
         {
-            limitPosition = position[v];
-            move.limit = window.start + v;
+            limitPosition = at;
+            move.limit = other;
         }
     }
     move.limitAbove = movedUp;
 
-    // Counterfactual: put only this instruction back, as close to its old place
-    // as the dependences allow, and count the stalls again.
+    // The new block order without it, and where it would go back.
     std::vector<int> rest;
-    for (int v : perm)
+    for (int k = start; k < end; ++k)
     {
-        if (v != node)
+        if (ctx.order[k] != instruction)
         {
-            rest.push_back(v);
+            rest.push_back(ctx.order[k]);
         }
     }
-    // its old place in the new order: right after the last instruction that came before it
-    int target = 0;
+    int target = 0; // right after the last instruction that came before it
     for (int index = 0; index < static_cast<int>(rest.size()); ++index)
     {
-        if (rest[index] < node)
+        if (rest[index] < instruction)
         {
             target = index + 1;
         }
@@ -1108,11 +1100,11 @@ void explainMove(Context &ctx, MoveInfo &move)
     int high = static_cast<int>(rest.size());
     for (int index = 0; index < static_cast<int>(rest.size()); ++index)
     {
-        if (dag.edge[rest[index]][node] != -1)
+        if (rest[index] < instruction && mustStayOrdered(rest[index], instruction))
         {
             low = std::max(low, index + 1);
         }
-        if (dag.edge[node][rest[index]] != -1)
+        if (rest[index] > instruction && mustStayOrdered(instruction, rest[index]))
         {
             high = std::min(high, index);
         }
@@ -1128,51 +1120,37 @@ void explainMove(Context &ctx, MoveInfo &move)
         move.reason = MoveReason::FollowsDependency;
         if (target > current && high < static_cast<int>(rest.size()))
         {
-            move.pinnedBy = window.start + rest[high];
+            move.pinnedBy = rest[high];
             move.pinnedBefore = true;
         }
         else if (target < current && low > 0)
         {
-            move.pinnedBy = window.start + rest[low - 1];
+            move.pinnedBy = rest[low - 1];
             move.pinnedBefore = false;
         }
         return;
     }
 
     std::vector<int> putBack = rest;
-    putBack.insert(putBack.begin() + back, node);
-    PipeState state;
-    copy_state(&state, const_cast<PipeState *>(&window.before));
-    const int stallsBack = count_window_stalls(p, &ctx.model, &state, const_cast<Dag *>(&dag), putBack.data(),
-                                               window.end, window.blockEnd);
-    move.saving = stallsBack - window.stalls[window.chosen];
+    putBack.insert(putBack.begin() + back, instruction);
+    std::vector<int> fullOrder = ctx.order;
+    std::copy(putBack.begin(), putBack.end(), fullOrder.begin() + start);
+    const std::vector<Wait> backWaits = waitsInOrder(ctx, fullOrder);
+    move.saving = totalStalls(backWaits) - stallsChosen;
     if (move.saving <= 0)
     {
         move.reason = MoveReason::Neutral;
         return;
     }
 
-    const std::vector<Wait> chosenWaits = replayWindow(ctx, window, perm);
-    const std::vector<Wait> backWaits = replayWindow(ctx, window, putBack);
-    auto orderPosition = [&](int other) {
-        if (other < window.start)
-        {
-            return -1;
-        }
-        if (other < window.end)
-        {
-            return position[other - window.start];
-        }
-        return count + (other - window.end);
-    };
-    for (size_t k = 0; k < chosenWaits.size(); ++k)
+    // Who waits longer when it goes back (this block, or the next block's first lines).
+    for (int other = 0; other < ctx.instructionCount; ++other)
     {
-        if (backWaits[k].stalls > chosenWaits[k].stalls)
+        if (backWaits[other].stalls > ctx.waitAfter[other].stalls)
         {
-            move.fixedConsumers.push_back(window.start + static_cast<int>(k));
+            move.fixedConsumers.push_back(other);
         }
     }
-    (void)orderPosition;
     move.reason = MoveReason::Indirect;
     // Only name hazards that really were in the student's order and got shorter.
     auto reallyShorter = [&](int consumer) {
@@ -1208,7 +1186,7 @@ void explainMove(Context &ctx, MoveInfo &move)
     if (!move.fixedConsumers.empty())
     {
         move.gapConsumer = move.fixedConsumers.front();
-        move.gapProducer = backWaits[move.gapConsumer - window.start].producer;
+        move.gapProducer = backWaits[move.gapConsumer].producer;
     }
 }
 
@@ -1217,6 +1195,7 @@ void computeMoves(Context &ctx)
     Program *p = ctx.program.get();
     ctx.moves.clear();
     ctx.moveOf.assign(static_cast<size_t>(p->nins), -1);
+    const int stallsChosen = totalStalls(ctx.waitAfter);
 
     for (int b = 0; b < p->nblocks; ++b)
     {
@@ -1354,7 +1333,7 @@ void computeMoves(Context &ctx)
             move.block = b;
             move.fromPos = move.instruction - start;
             move.toPos = ctx.slotOf[move.instruction] - start;
-            explainMove(ctx, move);
+            explainMove(ctx, move, stallsChosen);
             ctx.moveOf[move.instruction] = static_cast<int>(ctx.moves.size());
             ctx.moves.push_back(move);
         }
@@ -1364,15 +1343,16 @@ void computeMoves(Context &ctx)
 } // namespace
 } // namespace detail
 
-AnalysisResult analyzeProgram(const std::string &source, const AnalysisOptions &options)
+namespace detail
 {
-    using namespace detail;
-    AnalysisResult result;
+
+bool analyze(Context &ctx, const std::string &source, const AnalysisOptions &options, AnalysisResult &result)
+{
+    result = AnalysisResult{};
     result.options = options;
     result.options.windowSize = std::clamp(options.windowSize, 1, MAX_WIN);
     result.originalText = source;
 
-    Context ctx;
     ctx.options = result.options;
     ctx.forwarding = hasForwarding(options.variant);
     ctx.hazardUnit = hasHazardUnit(options.variant);
@@ -1384,9 +1364,10 @@ AnalysisResult analyzeProgram(const std::string &source, const AnalysisOptions &
         if (!prepare(ctx, source, error))
         {
             result.error = error;
-            return result;
+            return false;
         }
         schedule(ctx);
+        computeDeps(ctx);
         computeWaits(ctx);
         if (!ctx.hazardUnit)
         {
@@ -1401,9 +1382,19 @@ AnalysisResult analyzeProgram(const std::string &source, const AnalysisOptions &
         result.options = options;
         result.originalText = source;
         result.error = std::string("Internal error in the reordering analysis: ") + exception.what();
-        return result;
+        return false;
     }
     result.ok = true;
+    return true;
+}
+
+} // namespace detail
+
+AnalysisResult analyzeProgram(const std::string &source, const AnalysisOptions &options)
+{
+    detail::Context ctx;
+    AnalysisResult result;
+    detail::analyze(ctx, source, options, result);
     return result;
 }
 
