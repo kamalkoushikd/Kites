@@ -167,6 +167,22 @@ SuggestionPanel::SuggestionPanel(QWidget *parent, EditorTab *editorTab, Processo
         m_squiggles = new HazardSquiggles(edit);
         connect(edit, &QPlainTextEdit::textChanged, this, &SuggestionPanel::onTextChanged);
     }
+    if (m_editorTab)
+    {
+        // another open document: the squiggles and suggestions follow it
+        connect(m_editorTab, &EditorTab::currentEditorChanged, this,
+                [this](Editor *edit)
+                {
+                    for (QPlainTextEdit *other : m_editorTab->findChildren<QPlainTextEdit *>())
+                    {
+                        disconnect(other, &QPlainTextEdit::textChanged, this, &SuggestionPanel::onTextChanged);
+                    }
+                    delete m_squiggles;
+                    m_squiggles = new HazardSquiggles(edit);
+                    connect(edit, &QPlainTextEdit::textChanged, this, &SuggestionPanel::onTextChanged);
+                    onTextChanged();
+                });
+    }
 
     // The banner shown when Run is pressed while there are suggestions.
     m_runBanner = new QFrame(m_editorTab);
@@ -206,7 +222,7 @@ SuggestionPanel::SuggestionPanel(QWidget *parent, EditorTab *editorTab, Processo
 
 QPlainTextEdit *SuggestionPanel::editor() const
 {
-    return m_editorTab ? m_editorTab->findChild<QPlainTextEdit *>(QStringLiteral("assemblyTextEdit")) : nullptr;
+    return m_editorTab ? m_editorTab->currentEditor() : nullptr;
 }
 
 bool SuggestionPanel::pipelineProcessor() const

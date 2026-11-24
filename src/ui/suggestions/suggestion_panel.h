@@ -93,7 +93,7 @@ private:
     QPushButton *m_dismissButton = nullptr;
     PipelineTimeline *m_timeline = nullptr;
     QWidget *m_details = nullptr;
-    HazardSquiggles *m_squiggles = nullptr;
+    QPointer<HazardSquiggles> m_squiggles; // on the current document's editor
     QTimer *m_reanalyzeTimer = nullptr;
 
     // Run banner

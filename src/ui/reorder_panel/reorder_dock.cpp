@@ -310,6 +310,22 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
         connect(edit, &QPlainTextEdit::textChanged, this, &ReorderDock::onEditorTextChanged);
         m_diffView->setFont(edit->font());
     }
+    if (m_editorTab)
+    {
+        // another open document: the panel follows it
+        connect(m_editorTab, &EditorTab::currentEditorChanged, this,
+                [this](Editor *edit)
+                {
+                    for (QPlainTextEdit *other : m_editorTab->findChildren<QPlainTextEdit *>())
+                    {
+                        disconnect(other, &QPlainTextEdit::textChanged, this, &ReorderDock::onEditorTextChanged);
+                    }
+                    connect(edit, &QPlainTextEdit::textChanged, this, &ReorderDock::onEditorTextChanged);
+                    m_appliedText.clear(); // Revert belongs to the document it was applied to
+                    m_textBeforeApply.clear();
+                    onEditorTextChanged();
+                });
+    }
     connect(&FontManager::getInstance(), &FontManager::fontChangedSignal, this,
             [this](const QFont &)
             {
@@ -400,7 +416,7 @@ void ReorderDock::dockTo(Qt::DockWidgetArea area)
 
 QPlainTextEdit *ReorderDock::editor() const
 {
-    return m_editorTab ? m_editorTab->findChild<QPlainTextEdit *>(QStringLiteral("assemblyTextEdit")) : nullptr;
+    return m_editorTab ? m_editorTab->currentEditor() : nullptr;
 }
 
 PipelineVariant ReorderDock::currentVariant() const

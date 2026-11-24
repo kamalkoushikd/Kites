@@ -7,6 +7,7 @@
 #include "language_service/language_service.h"
 #include "processor/processor_manager.h"
 #include "ui/common/kitestab.h"
+#include <QHash>
 #include <QPlainTextEdit>
 #include <QString>
 #include <QTextCharFormat>
@@ -44,6 +45,16 @@ public:
     // syntax error. No-op if line <= 0 (PC couldn't be resolved to a source line).
     void showRuntimeError(int line, const QString &message);
 
+    // Open documents: one tab each. Run, Reorder and the other views work on the current one.
+    Editor *currentEditor() const;
+    void newDocument();
+    bool openFile(const QString &filePath);
+    bool save();
+    bool saveAs();
+    bool closeCurrentDocument();
+    // Asks about every document with unsaved changes; false if the user cancelled.
+    bool closeAllDocuments();
+
 public slots:
     void onExpandButtonClicked(bool checked);
     void switchToExpandedView();
@@ -52,9 +63,19 @@ public slots:
 private slots:
     void requestLiveDiagnostics();
     void applyDiagnostics(const QVector<Diagnostic> &diagnostics);
+    void onCurrentDocumentChanged(int index);
 
 private:
-    Editor *m_editor = nullptr;
+    Editor *addDocument();
+    Editor *editorAt(int index) const;
+    bool saveDocument(Editor *editor, QString filePath);
+    bool closeDocument(int index);
+    bool confirmClose(Editor *editor);
+    QString documentName(Editor *editor) const;
+    void updateTabTitle(Editor *editor);
+
+    Editor *m_editor = nullptr; // the current document
+    QHash<Editor *, QString> m_filePaths; // empty for a document that was never saved
     DisassemblyEditor *m_disassemblyView = nullptr;
     Editor *m_expandedView = nullptr;
     // m_disassemblyView is an object of the same class as m_editor
@@ -71,6 +92,7 @@ private:
     Ui::EditorTab *ui;
 signals:
     void loadProgramSignal(std::string& sourceText); 
+    void currentEditorChanged(Editor *editor);
 };
 } // namespace Kites
 #endif EDITORTAB__H

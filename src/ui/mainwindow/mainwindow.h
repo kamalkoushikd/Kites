@@ -48,6 +48,9 @@ public:
     void setUpUI();
     ~MainWindow();
 
+protected:
+    void closeEvent(QCloseEvent *event) override;
+
 private:
     void setUpStatusBar();
     void setUpToolBar();

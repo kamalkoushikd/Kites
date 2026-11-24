@@ -17,6 +17,7 @@
 #include "ui_mainwindow.h"
 #include "utils/utils.h"
 #include <QActionGroup>
+#include <QCloseEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -54,8 +55,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setUpStatusBar();
     setUpSidebar();
     setUpToolBar();
+    setUpTabs(); // the File menu acts on the editor tab
     setUpMenubar();
-    setUpTabs();
 
     // m_registerContainer = new RegisterContainer(this);
     mainLayout->setSpacing(0);
@@ -301,14 +302,25 @@ void MainWindow::setUpMenubar()
     QMenu *preferencesMenu = new QMenu("Preferences", this);
     QMenu *processorMenu   = new QMenu("Processor", this);
     
-    QAction *openAction  = new QAction(IconManager::getInstance().getIcon(Icon::Open), "Open", this);
-    QAction *saveAction  = new QAction(IconManager::getInstance().getIcon(Icon::Save), "Save", this);
-    QAction *exitAction  = new QAction("Exit", this);
-    QAction *aboutAction = new QAction(IconManager::getInstance().getIcon(Icon::About), "About", this);
+    QAction *newAction    = new QAction("New", this);
+    QAction *openAction   = new QAction(IconManager::getInstance().getIcon(Icon::Open), "Open", this);
+    QAction *saveAction   = new QAction(IconManager::getInstance().getIcon(Icon::Save), "Save", this);
+    QAction *saveAsAction = new QAction("Save As...", this);
+    QAction *closeAction  = new QAction("Close", this);
+    QAction *exitAction   = new QAction("Exit", this);
+    QAction *aboutAction  = new QAction(IconManager::getInstance().getIcon(Icon::About), "About", this);
+    newAction->setShortcut(QKeySequence::New);
+    openAction->setShortcut(QKeySequence::Open);
+    saveAction->setShortcut(QKeySequence::Save);
+    saveAsAction->setShortcut(QKeySequence::SaveAs);
+    closeAction->setShortcut(QKeySequence::Close);
 
     ///////////File Menu///////////////////
+    fileMenu->addAction(newAction);
     fileMenu->addAction(openAction);
     fileMenu->addAction(saveAction);
+    fileMenu->addAction(saveAsAction);
+    fileMenu->addAction(closeAction);
     fileMenu->addSeparator();
     fileMenu->addAction(exitAction);
     ////////////Setting Menu////////////////
@@ -355,52 +367,26 @@ void MainWindow::setUpMenubar()
     ///////////Help Menu///////////////////
     helpMenu->addAction(aboutAction);
 
+    auto *editorTab = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+    connect(newAction, &QAction::triggered, editorTab, &EditorTab::newDocument);
     connect(openAction, &QAction::triggered, this,
-            [this]()
+            [this, editorTab]()
             {
-                QString filename = QFileDialog::getOpenFileName(
+                const QStringList filenames = QFileDialog::getOpenFileNames(
                     this, "Open File", "", "Assembly Files (*.asm *.s);;All Files (*)");
-
-                if (!filename.isEmpty())
+                for (const QString &filename : filenames)
                 {
-                    QFile file(filename);
-                    if (file.open(QIODevice::ReadOnly | QIODevice::Text))
-                    {
-                        QTextStream in(&file);
-                        QString content = in.readAll();
-                        auto editorTab =
-                            dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
-                        if (editorTab)
-                        {
-                            editorTab->setRawText(content);
-                        }
-                        file.close();
-                    }
+                    editorTab->openFile(filename);
+                }
+                if (!filenames.isEmpty())
+                {
+                    m_sidebar->setCurrentRow(TabIndex::EditorTabIndex);
                 }
             });
-
-    connect(saveAction, &QAction::triggered, this,
-            [this]()
-            {
-                QString filename = QFileDialog::getSaveFileName(
-                    this, "Save File", "", "Assembly Files (*.asm *.s);;All Files (*)");
-
-                if (!filename.isEmpty())
-                {
-                    QFile file(filename);
-                    if (file.open(QIODevice::WriteOnly | QIODevice::Text))
-                    {
-                        QTextStream out(&file);
-                        auto editorTab =
-                            dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
-                        if (editorTab)
-                        {
-                            out << editorTab->getRawText().c_str();
-                        }
-                        file.close();
-                    }
-                }
-            });
+    connect(saveAction, &QAction::triggered, editorTab, &EditorTab::save);
+    connect(saveAsAction, &QAction::triggered, editorTab, &EditorTab::saveAs);
+    connect(closeAction, &QAction::triggered, editorTab, &EditorTab::closeCurrentDocument);
+    connect(exitAction, &QAction::triggered, this, &QWidget::close);
 }
 
 void MainWindow::setUpTabs()
@@ -630,6 +616,17 @@ void MainWindow::themeChangedSlot([[maybe_unused]] const QString &themeId)
         else if (action->text() == "Advanced Settings")
             action->setIcon(IconManager::getInstance().getIcon(Icon::Settings));
     }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    auto *editorTab = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+    if (editorTab && !editorTab->closeAllDocuments())
+    {
+        event->ignore();
+        return;
+    }
+    QMainWindow::closeEvent(event);
 }
 
 MainWindow::~MainWindow()
