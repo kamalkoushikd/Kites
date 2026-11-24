@@ -233,7 +233,7 @@ void printLines(const std::string &title, const reorder::RunProfile &profile)
 void usage()
 {
     std::cerr << "usage: kites-cli compare FILE [--vm rv5-h-f|rv5-h-nf|rv5-nh-f|rv5-nh-nf|all] [--window N]\n"
-                 "                              [--fixed] [--lines] [--mem START_HEX BYTES] [--write-reordered PREFIX]\n";
+                 "                              [--fixed] [--no-cross-block] [--lines] [--mem START_HEX BYTES] [--write-reordered PREFIX]\n";
 }
 
 } // namespace
@@ -256,6 +256,7 @@ int runCompareMode(int argc, char *argv[])
     int window = 16;
     bool sliding = true;    // --fixed: the P-1 fixed windows
     bool showLines = false; // --lines: measured stalls per line
+    bool crossBlock = true; // --no-cross-block: without the cross-block precaution
     uint64_t memStart = 0x10000000;
     uint64_t memBytes = 256;
     for (int i = 3; i < argc; ++i)
@@ -272,6 +273,8 @@ int runCompareMode(int argc, char *argv[])
         }
         else if (arg == "--fixed")
             sliding = false;
+        else if (arg == "--no-cross-block")
+            crossBlock = false;
         else if (arg == "--lines")
             showLines = true;
         else if (arg == "--write-reordered" && i + 1 < argc)
@@ -299,7 +302,7 @@ int runCompareMode(int argc, char *argv[])
         return 2;
     }
 
-    std::cout << "file " << file << "  (window " << window << (sliding ? " sliding" : " fixed") << ", memory 0x" << std::hex << memStart << std::dec << " + "
+    std::cout << "file " << file << "  (window " << window << (sliding ? " sliding" : " fixed") << (crossBlock ? "" : ", no cross-block") << ", memory 0x" << std::hex << memStart << std::dec << " + "
               << memBytes << " bytes)\n";
     std::cout << std::left << std::setw(11) << "pipeline" << std::setw(16) << "stalls (model)" << std::setw(18)
               << "cycles (Kites)" << std::setw(18) << "stalls (Kites)" << std::setw(20) << "original on pipe" << std::setw(20) << "reordered on rvss"
@@ -314,6 +317,7 @@ int runCompareMode(int argc, char *argv[])
         options.hazardUnit = pipeline.hazardUnit;
         options.window = window;
         options.slidingWindows = sliding;
+        options.crossBlock = crossBlock;
         const suggestions::Result analysis = suggestions::analyze(original, options);
         const std::string reordered = suggestions::applyAll(original, options);
         if (!writePrefix.empty())

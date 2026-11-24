@@ -17,6 +17,8 @@
  *           (sum of |new position - original position|)
  *      If that also ties, the earlier one is kept (current order first),
  *      so with no savings the code is unchanged.
+ * Option -c off turns the cross-block precaution off: only the current
+ * order and the two plain schedules are compared, by a. and c. (as in P-2).
  * The windows move through the block in one of two ways (option -a,
  * see commit_count): slide (default) or fixed.
  *
@@ -182,9 +184,9 @@ int commit_count(Options *opt)
  * order[] starts as the original order and is changed in place. For each
  * block, a window covers positions pos .. pos+W-1 of the CURRENT order:
  *   1. build the DAG of those instructions (in their current order)
- *   2. make the height and the succ schedule (list_schedule)
- *   3. keep the best of: current order, height, succ
- *      (fewest stalls, then smallest swap length, then the earlier one)
+ *   2. make the height and the succ schedule (list_schedule), and the same
+ *      two with the cross-block heights (only with -c on)
+ *   3. keep the best of: current order and those schedules (rules a-c above)
  *   4. write it back into order[], keep the first commit_count() positions
  *      for good (issue them into the pipeline state) and move pos on.
  * With the fixed mode every position is kept at once, so each window is
@@ -198,6 +200,7 @@ void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
     Dag g2;                     /* the same window with the cross-block heights */
     int cand[5][MAX_WIN];       /* current, height, succ, height+cb, succ+cb      */
     int nb, best_next;          /* stalls in the next block's first lines        */
+    int ncand;                  /* 5 with the cross-block precaution, 3 without  */
     int b, k, c, n, keep;
     int block_end;
     int pos, we;                /* window = positions pos .. we-1 of order[] */
@@ -207,6 +210,10 @@ void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
         order[k] = k;
     if (opt->reorder == 0)
         return;
+
+    ncand = 5;
+    if (opt->cross_block == 0)
+        ncand = 3;
 
     reset_state(&st);
 
@@ -223,7 +230,8 @@ void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
             for (k = 0; k < n; k++)
                 nodes[k] = order[pos + k];
             build_dag(p, m, &st, nodes, n, &g, we, -1);
-            build_dag(p, m, &st, nodes, n, &g2, we, block_end);
+            if (ncand == 5)
+                build_dag(p, m, &st, nodes, n, &g2, we, block_end);
 
             /* candidate 0: the current order */
             for (k = 0; k < n; k++)
@@ -233,16 +241,23 @@ void schedule_program(Program *p, HazardModel *m, Options *opt, int order[])
                candidates 3, 4: the same with the cross-block precaution */
             list_schedule(p, &g, st.next_slot, PRIO_HEIGHT, cand[1]);
             list_schedule(p, &g, st.next_slot, PRIO_SUCC, cand[2]);
-            list_schedule(p, &g2, st.next_slot, PRIO_HEIGHT, cand[3]);
-            list_schedule(p, &g2, st.next_slot, PRIO_SUCC, cand[4]);
+            if (ncand == 5) {
+                list_schedule(p, &g2, st.next_slot, PRIO_HEIGHT, cand[3]);
+                list_schedule(p, &g2, st.next_slot, PRIO_SUCC, cand[4]);
+            }
 
             /* keep the best: fewest stalls inside the block, then fewest
-               stalls at the next block's start, then smallest swap length */
+               stalls at the next block's start (only with -c on), then
+               smallest swap length */
             best = 0;
             best_stalls = count_window_stalls(p, m, &st, &g, cand[0], we, block_end, &best_next);
+            if (opt->cross_block == 0)
+                best_next = 0;
             best_len = 0;
-            for (c = 1; c <= 4; c++) {
+            for (c = 1; c < ncand; c++) {
                 s = count_window_stalls(p, m, &st, &g, cand[c], we, block_end, &nb);
+                if (opt->cross_block == 0)
+                    nb = 0;
                 len = swap_length(cand[c], n);
                 if (s < best_stalls || (s == best_stalls && nb < best_next) ||
                     (s == best_stalls && nb == best_next && len < best_len)) {

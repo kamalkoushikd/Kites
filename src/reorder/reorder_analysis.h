@@ -42,6 +42,7 @@ struct AnalysisOptions
     PipelineVariant variant = PipelineVariant::HazardUnitForwarding;
     int windowSize = 16;        ///< 1..64 instructions per scheduling window
     bool slidingWindows = true; ///< windows 1..W, 2..W+1, ... (false: 1..W, W+1..2W, ...)
+    bool crossBlock = true;     ///< cross-block precaution: also count the stalls the block's end causes in the next block
 };
 
 enum class CellKind

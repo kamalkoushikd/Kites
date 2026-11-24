@@ -30,6 +30,7 @@ struct Options
     bool hazardUnit = true; ///< false: the code needs NOPs (they are recomputed for the new order)
     int window = 16;        ///< instructions per window (1..64)
     bool slidingWindows = true; ///< windows 1..W, 2..W+1, ... (false: 1..W, W+1..2W, ...)
+    bool crossBlock = true;     ///< cross-block precaution on / off
 };
 
 /// One row of a pipeline timeline: an instruction and when it goes through the pipeline.

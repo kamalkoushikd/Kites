@@ -6,7 +6,8 @@
  * this file only regroups its result per changed block:
  *   - the block's new lines (what Apply writes),
  *   - a before/after timeline (issue cycle and stalls of every instruction),
- *   - one Moved / Why / Effect suggestion per wait that got shorter.
+ *   - one Moved / Why / Effect suggestion per wait that got shorter, also a wait at the
+ *     start of the next block that this block's new order shortens (cross-block).
  */
 #include "reorder_internal.h"
 #include "suggestions.h"
@@ -111,6 +112,7 @@ reorder::AnalysisOptions analysisOptionsFor(const Options &options)
     }
     result.windowSize = options.window;
     result.slidingWindows = options.slidingWindows;
+    result.crossBlock = options.crossBlock;
     return result;
 }
 
@@ -175,13 +177,9 @@ Result analyze(const std::string &source, const Options &requested)
         change.stallsBefore = segment.stallsBefore;
         change.stallsAfter = segment.stallsAfter;
 
-        // Timelines.
+        // Timelines (rows are added below).
         const Wait &firstBefore = ctx.waitBefore[start];
         const int baseBefore = firstBefore.startSlot - firstBefore.stalls;
-        for (int i = start; i < end; ++i)
-        {
-            change.before.push_back(timelineRow(ctx, i, ctx.waitBefore[i], baseBefore));
-        }
         const Wait &firstAfter = ctx.waitAfter[ctx.order[start]];
         const int baseAfter = firstAfter.startSlot - firstAfter.stalls;
 
@@ -189,6 +187,37 @@ Result analyze(const std::string &source, const Options &requested)
         auto newPos = [&](int instruction) { return ctx.slotOf[instruction] - start; };
         std::vector<int> fillers;
         const int blockIndex = static_cast<int>(result.blocks.size());
+        auto addSuggestion = [&](int p, int c, int moved, const Wait &was, const Wait &now, bool nextBlock)
+        {
+            Suggestion suggestion;
+            suggestion.block = blockIndex;
+            suggestion.movedLine = lineOf(ctx, moved);
+            suggestion.movedText = codeOf(ctx, moved);
+            suggestion.producerLine = lineOf(ctx, p);
+            suggestion.producerText = codeOf(ctx, p);
+            suggestion.consumerLine = lineOf(ctx, c);
+            suggestion.consumerText = codeOf(ctx, c);
+            suggestion.reg = reorder::detail::registerName(ctx, c, was.reg);
+            suggestion.slotsNeeded = slotsNeeded(ctx, p);
+            suggestion.slotsPresent = suggestion.slotsNeeded - was.stalls;
+            suggestion.saved = was.stalls - now.stalls;
+            suggestion.wrongWithoutNops = !ctx.hazardUnit && ctx.waitStudent[c].stalls > 0;
+            suggestion.why = suggestion.producerText + " (line " + std::to_string(suggestion.producerLine) + ") → " +
+                             suggestion.consumerText + " (line " + std::to_string(suggestion.consumerLine) + ") on " +
+                             suggestion.reg + ": needs " + plural(suggestion.slotsNeeded, "slot") + ", has " +
+                             std::to_string(suggestion.slotsPresent);
+            if (nextBlock)
+            {
+                suggestion.why += "; line " + std::to_string(suggestion.consumerLine) +
+                                  " is in the next block (cross-block precaution)";
+            }
+            suggestion.effect = "−" + plural(suggestion.saved, unitWord);
+            result.suggestions.push_back(suggestion);
+            if (std::find(fillers.begin(), fillers.end(), moved) == fillers.end())
+            {
+                fillers.push_back(moved);
+            }
+        };
         for (int c = start; c < end; ++c)
         {
             const Wait &was = ctx.waitBefore[c];
@@ -214,31 +243,40 @@ Result analyze(const std::string &source, const Options &requested)
             {
                 moved = newPos(c) != c - start ? c : p;
             }
-            Suggestion suggestion;
-            suggestion.block = blockIndex;
-            suggestion.movedLine = lineOf(ctx, moved);
-            suggestion.movedText = codeOf(ctx, moved);
-            suggestion.producerLine = lineOf(ctx, p);
-            suggestion.producerText = codeOf(ctx, p);
-            suggestion.consumerLine = lineOf(ctx, c);
-            suggestion.consumerText = codeOf(ctx, c);
-            suggestion.reg = reorder::detail::registerName(ctx, c, was.reg);
-            suggestion.slotsNeeded = slotsNeeded(ctx, p);
-            suggestion.slotsPresent = suggestion.slotsNeeded - was.stalls;
-            suggestion.saved = was.stalls - now.stalls;
-            suggestion.wrongWithoutNops = !ctx.hazardUnit && ctx.waitStudent[c].stalls > 0;
-            suggestion.why = suggestion.producerText + " (line " + std::to_string(suggestion.producerLine) + ") → " +
-                             suggestion.consumerText + " (line " + std::to_string(suggestion.consumerLine) + ") on " +
-                             suggestion.reg + ": needs " + plural(suggestion.slotsNeeded, "slot") + ", has " +
-                             std::to_string(suggestion.slotsPresent);
-            suggestion.effect = "−" + plural(suggestion.saved, unitWord);
-            result.suggestions.push_back(suggestion);
-            if (std::find(fillers.begin(), fillers.end(), moved) == fillers.end())
-            {
-                fillers.push_back(moved);
-            }
+            addSuggestion(p, c, moved, was, now, false);
         }
-        for (int k = start; k < end; ++k)
+
+        // Cross-block: a line at the start of the next block waits less because a producer in
+        // this block moved up (or lines moved from above it to below it).
+        int last = end - 1; // last instruction shown in the timelines
+        const int lookahead = lookahead_lines(const_cast<HazardModel *>(&ctx.model));
+        for (int c = end; c < std::min(end + lookahead, ctx.instructionCount); ++c)
+        {
+            const Wait &was = ctx.waitBefore[c];
+            const Wait &now = ctx.waitAfter[c];
+            const int p = was.producer;
+            if (was.stalls <= now.stalls || p < start || p >= end)
+            {
+                continue;
+            }
+            int moved = p;
+            int distance = std::abs(newPos(p) - (p - start));
+            for (int x = start; x < end; ++x) // was above the producer, is below it now
+            {
+                if (x < p && newPos(x) > newPos(p) && std::abs(newPos(x) - (x - start)) > distance)
+                {
+                    moved = x;
+                    distance = std::abs(newPos(x) - (x - start));
+                }
+            }
+            addSuggestion(p, c, moved, was, now, true);
+            last = std::max(last, c);
+        }
+        for (int i = start; i <= last; ++i)
+        {
+            change.before.push_back(timelineRow(ctx, i, ctx.waitBefore[i], baseBefore));
+        }
+        for (int k = start; k <= last; ++k)
         {
             const int instruction = ctx.order[k];
             TimelineRow row = timelineRow(ctx, instruction, ctx.waitAfter[instruction], baseAfter);

@@ -824,6 +824,7 @@ void schedule(Context &ctx)
     ::Options options{};
     options.window = ctx.options.windowSize;
     options.win_mode = ctx.options.slidingWindows ? WIN_SLIDE : WIN_FIXED;
+    options.cross_block = ctx.options.crossBlock ? 1 : 0;
     options.reorder = 1;
     options.insert_nops = 0;
     ctx.order.assign(static_cast<size_t>(std::max(count, 1)), 0);

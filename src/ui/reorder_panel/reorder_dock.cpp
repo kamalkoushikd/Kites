@@ -1,6 +1,5 @@
 #include "reorder_dock.h"
 
-#include "measured_view.h"
 #include "reorder_diff_view.h"
 
 #include "processor/processor_manager.h"
@@ -123,12 +122,6 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_windowSpin->setSuffix(tr(" instructions"));
     m_windowSpin->setToolTip(tr("Instructions are only reordered inside windows of this many instructions "
                                 "of a basic block (a block ends at a label or a branch)."));
-    m_windowModeCombo = new QComboBox(content);
-    m_windowModeCombo->addItem(tr("Sliding"));
-    m_windowModeCombo->addItem(tr("Fixed"));
-    m_windowModeCombo->setToolTip(tr("Sliding: windows 1..W, 2..W+1, ... (only the first instruction of each window is "
-                                     "kept; no hazard is lost at a window edge).\nFixed: windows 1..W, W+1..2W, ... "
-                                     "(the P-1 method)."));
     m_analyzeButton = new QPushButton(tr("Analyze"), content);
     m_analyzeButton->setToolTip(tr("Analyze the code in the editor"));
     m_copyButton = new QPushButton(tr("Copy patch"), content);
@@ -142,7 +135,6 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     controls->addSpacing(6);
     controls->addWidget(new QLabel(tr("Window"), content));
     controls->addWidget(m_windowSpin);
-    controls->addWidget(m_windowModeCombo);
     controls->addWidget(m_analyzeButton);
     controls->addStretch(1);
     controls->addWidget(m_copyButton);
@@ -169,6 +161,9 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     status->setSpacing(8);
     m_summaryLabel = new QLabel(content);
     m_summaryLabel->setTextFormat(Qt::RichText);
+    m_summaryLabel->setToolTip(tr("Stalls / NOPs: the scheduler's count, every instruction once.\n"
+                                  "Measured on Kites: both programs run on the selected 5-stage pipeline; a stall "
+                                  "inside a loop counts every time the loop runs."));
     m_onlyChangedCheck = new QCheckBox(tr("Only changed blocks"), content);
     m_onlyChangedCheck->setChecked(true);
     m_onlyChangedCheck->setToolTip(tr("Fold blocks that the suggestion does not change"));
@@ -187,19 +182,12 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_suggestionsButton->setAutoExclusive(true);
     m_suggestionsButton->setToolTip(tr("One move at a time: what moved, why, the effect, and a pipeline timeline. "
                                        "Waiting lines are underlined in the editor."));
-    m_measuredButton = new QToolButton(content);
-    m_measuredButton->setText(tr("Measured"));
-    m_measuredButton->setCheckable(true);
-    m_measuredButton->setAutoExclusive(true);
-    m_measuredButton->setToolTip(tr("Run the original and the reordered program on the pipeline and compare the "
-                                    "stalls they really have, line by line (loops count every time they run)."));
     // the Kites theme has no style for checked buttons; show which view is on
     const QString toggleStyle = QStringLiteral("QToolButton:checked { background-color: palette(highlight); "
                                                "color: palette(highlighted-text); }");
     m_sideBySideButton->setStyleSheet(toggleStyle);
     m_unifiedButton->setStyleSheet(toggleStyle);
     m_suggestionsButton->setStyleSheet(toggleStyle);
-    m_measuredButton->setStyleSheet(toggleStyle);
     status->addWidget(m_summaryLabel, 1);
     status->addWidget(m_onlyChangedCheck);
     layout->addWidget(m_statusRow);
@@ -207,7 +195,6 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     controls->insertWidget(controls->indexOf(m_copyButton), m_sideBySideButton);
     controls->insertWidget(controls->indexOf(m_copyButton), m_unifiedButton);
     controls->insertWidget(controls->indexOf(m_copyButton), m_suggestionsButton);
-    controls->insertWidget(controls->indexOf(m_copyButton), m_measuredButton);
     controls->insertSpacing(controls->indexOf(m_copyButton), 12);
 
     m_bannerLabel = new QLabel(content);
@@ -239,10 +226,12 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
     m_views = new QStackedWidget(content);
     m_views->addWidget(splitter);      // Side by side / Unified
     m_views->addWidget(m_suggestions); // Suggestions
-    m_measured = new MeasuredView(content);
-    m_views->addWidget(m_measured);    // Measured
     layout->addWidget(m_views, 1);
     setWidget(content);
+
+    m_measureTimer = new QTimer(this);
+    m_measureTimer->setInterval(0);
+    connect(m_measureTimer, &QTimer::timeout, this, &ReorderDock::stepMeasuring);
 
     m_reanalyzeTimer = new QTimer(this);
     m_reanalyzeTimer->setSingleShot(true);
@@ -269,8 +258,6 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
                 }
             });
     connect(m_windowSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this](int) { m_reanalyzeTimer->start(); });
-    connect(m_windowModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this](int) { m_reanalyzeTimer->start(); });
     connect(m_sideBySideButton, &QToolButton::toggled, this,
             [this](bool checked)
             {
@@ -290,7 +277,6 @@ ReorderDock::ReorderDock(QMainWindow *window, EditorTab *editorTab, ProcessorMan
                 }
             });
     connect(m_suggestionsButton, &QToolButton::toggled, this, [this](bool) { updateViewMode(); });
-    connect(m_measuredButton, &QToolButton::toggled, this, [this](bool) { updateViewMode(); });
     connect(m_suggestions, &SuggestionPanel::reviewRequested, this, &ReorderDock::showSuggestions);
     connect(m_onlyChangedCheck, &QCheckBox::toggled, m_diffView, &ReorderDiffView::setCollapseUnchanged);
     connect(m_diffView, &ReorderDiffView::detailHovered, this,
@@ -496,13 +482,11 @@ bool ReorderDock::suggestionsView() const
     return m_suggestionsButton->isChecked();
 }
 
-// The diff's own controls are hidden in the Suggestions view (it has its own Apply) and in
-// the Measured view.
+// The diff's own controls are hidden in the Suggestions view (it has its own Apply).
 void ReorderDock::updateViewMode()
 {
-    const bool measured = m_measuredButton->isChecked();
-    const bool diff = !suggestionsView() && !measured;
-    m_views->setCurrentIndex(diff ? 0 : (measured ? 2 : 1));
+    const bool diff = !suggestionsView();
+    m_views->setCurrentIndex(diff ? 0 : 1);
     m_statusRow->setVisible(diff); // summary and "Only changed blocks" belong to the diff
     m_copyButton->setVisible(diff);
     m_revertButton->setVisible(diff);
@@ -544,7 +528,6 @@ void ReorderDock::analyze()
     reorder::AnalysisOptions options;
     options.variant = currentVariant();
     options.windowSize = m_windowSpin->value();
-    options.slidingWindows = m_windowModeCombo->currentIndex() == 0;
     m_analyzedText = edit->toPlainText();
     m_result = std::make_shared<const reorder::AnalysisResult>(
         reorder::analyzeProgram(m_analyzedText.toStdString(), options));
@@ -552,7 +535,7 @@ void ReorderDock::analyze()
     m_diffView->setPlaceholderText(m_result->ok ? tr("There is nothing to show for this program.")
                                                 : QString::fromStdString(m_result->error));
     m_diffView->setResult(m_result);
-    m_measured->setAnalysis(m_result);
+    startMeasuring();
     scrollToFirstChange();
     showDetails(QString());
     updateState();
@@ -562,7 +545,6 @@ void ReorderDock::analyze()
     suggestionOptions.forwarding = reorder::hasForwarding(options.variant);
     suggestionOptions.hazardUnit = reorder::hasHazardUnit(options.variant);
     suggestionOptions.window = options.windowSize;
-    suggestionOptions.slidingWindows = options.slidingWindows;
     m_suggestions->setOptions(suggestionOptions);
     m_suggestions->analyze();
 }
@@ -794,7 +776,7 @@ void ReorderDock::showDetails(const QString &html)
         m_details->setHtml(wrapDetails(
             tr("<p><b>Instruction reordering</b></p><p>Press <b>Analyze</b> to look for an order of your "
                "instructions with fewer pipeline stalls. Every change is explained: hover over a row of the diff "
-               "to see why that line moved and why the move is safe.</p>")));
+               "to see why that line moved.</p>")));
         return;
     }
     if (!m_result->ok)
@@ -805,6 +787,78 @@ void ReorderDock::showDetails(const QString &html)
         return;
     }
     m_details->setHtml(wrapDetails(QString::fromStdString(m_result->overviewHtml)));
+}
+
+namespace
+{
+constexpr unsigned kMeasureCycles = 2000000; ///< a run that takes longer is not counted
+constexpr unsigned kCyclesPerTick = 20000;   ///< keeps the editor responsive while it runs
+} // namespace
+
+// Runs both programs on the selected pipeline. With a hazard unit the original is run as
+// written and the stall cycles are counted; without one the NOPs are counted, and the
+// original gets its NOPs first (the order kept, window of 1), as a program without them
+// is not correct on that pipeline.
+void ReorderDock::startMeasuring()
+{
+    m_measureTimer->stop();
+    m_runBefore.reset();
+    m_runAfter.reset();
+    m_measuredSummary.clear();
+    if (!m_result || !m_result->ok)
+    {
+        return;
+    }
+    const reorder::PipelineVariant variant = m_result->options.variant;
+    std::string before = m_result->originalText;
+    if (!reorder::hasHazardUnit(variant))
+    {
+        reorder::AnalysisOptions nopsOnly = m_result->options;
+        nopsOnly.windowSize = 1;
+        before = reorder::analyzeProgram(before, nopsOnly).newText;
+    }
+    m_runBefore = std::make_unique<reorder::ProfiledRun>(before, variant, kMeasureCycles);
+    m_runAfter = std::make_unique<reorder::ProfiledRun>(m_result->newText, variant, kMeasureCycles);
+    m_measuredSummary = tr(" · measuring on Kites…");
+    m_measureTimer->start();
+}
+
+void ReorderDock::stepMeasuring()
+{
+    const bool beforeRuns = m_runBefore && m_runBefore->step(kCyclesPerTick);
+    const bool afterRuns = m_runAfter && m_runAfter->step(kCyclesPerTick);
+    if (beforeRuns || afterRuns)
+    {
+        return;
+    }
+    m_measureTimer->stop();
+    if (!m_runBefore || !m_runAfter || !m_result)
+    {
+        return;
+    }
+    const reorder::RunProfile &before = m_runBefore->profile();
+    const reorder::RunProfile &after = m_runAfter->profile();
+    const bool hazardUnit = reorder::hasHazardUnit(m_result->options.variant);
+    if (!before.ok || !after.ok)
+    {
+        m_measuredSummary = tr(" · measured on Kites: the run stopped with an error");
+    }
+    else if (!before.finished || !after.finished)
+    {
+        m_measuredSummary = tr(" · measured on Kites: does not end within %1 cycles").arg(kMeasureCycles);
+    }
+    else
+    {
+        const unsigned b = hazardUnit ? before.stalls : before.nops;
+        const unsigned a = hazardUnit ? after.stalls : after.nops;
+        m_measuredSummary = (hazardUnit ? tr(" · measured on Kites: <b>%1 → %2</b> stall cycles")
+                                        : tr(" · measured on Kites: <b>%1 → %2</b> NOPs run"))
+                                .arg(b)
+                                .arg(a);
+    }
+    m_runBefore.reset();
+    m_runAfter.reset();
+    updateState();
 }
 
 void ReorderDock::updateState()
@@ -852,6 +906,10 @@ void ReorderDock::updateState()
     {
         summary = tr("The analysis could not run");
     }
+    if (ok)
+    {
+        summary += m_measuredSummary;
+    }
     m_summaryLabel->setText(summary);
 
     // banner: the most important message first
@@ -896,7 +954,7 @@ void ReorderDock::updateState()
         m_bannerLabel->setText(messages.join(QStringLiteral("<br>")));
         m_bannerLabel->show();
     }
-    if (suggestionsView() || m_measuredButton->isChecked())
+    if (suggestionsView())
     {
         m_bannerLabel->hide(); // its messages describe the diff; the other views show their own
     }

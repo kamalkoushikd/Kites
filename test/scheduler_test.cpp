@@ -148,12 +148,14 @@ namespace
 using Kites::reorder::PipelineVariant;
 
 /// Stalls before -> after, as the tool's "TOTAL stalls: a -> b" line.
-std::pair<int, int> totals(const std::string &source, bool forwarding, int window, bool sliding)
+std::pair<int, int> totals(const std::string &source, bool forwarding, int window, bool sliding,
+                           bool crossBlock = true)
 {
     Kites::reorder::AnalysisOptions options;
     options.variant = forwarding ? PipelineVariant::HazardUnitForwarding : PipelineVariant::HazardUnitNoForwarding;
     options.windowSize = window;
     options.slidingWindows = sliding;
+    options.crossBlock = crossBlock;
     const Kites::reorder::AnalysisResult result = Kites::reorder::analyzeProgram(source, options);
     EXPECT_TRUE(result.ok) << result.error;
     return {result.stallsBefore, result.stallsAfter};
@@ -185,6 +187,13 @@ TEST(SchedulerTool, CrossBlockPrecautionMovesTheLoadUp)
 {
     EXPECT_EQ(totals(kCrossBlock, true, 16, true), std::make_pair(1, 0));
     EXPECT_EQ(totals(kCrossBlock, false, 16, true), std::make_pair(6, 4));
+}
+
+// reorder -c off: block 1 can not help itself, so nothing changes
+TEST(SchedulerTool, WithoutCrossBlockPrecautionTheLoadStays)
+{
+    EXPECT_EQ(totals(kCrossBlock, true, 16, true, false), std::make_pair(1, 1));
+    EXPECT_EQ(totals(kCrossBlock, false, 16, true, false), std::make_pair(6, 6));
 }
 
 TEST(SchedulerTool, StallsInsidePseudoInstructionsAreCounted)

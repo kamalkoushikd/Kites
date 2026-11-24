@@ -1,6 +1,7 @@
 #pragma once
 
 #include "reorder/reorder_analysis.h"
+#include "reorder/run_profile.h"
 
 #include <QDockWidget>
 #include <QString>
@@ -23,7 +24,6 @@ class QToolButton;
 namespace Kites
 {
 class EditorTab;
-class MeasuredView;
 class ProcessorManager;
 class ReorderDiffView;
 class SuggestionPanel;
@@ -77,6 +77,8 @@ private:
     QString wrapDetails(const QString &html) const;
     bool suggestionsView() const;
     void updateViewMode();
+    void startMeasuring();
+    void stepMeasuring();
 
     QMainWindow *m_window = nullptr;
     EditorTab *m_editorTab = nullptr;
@@ -84,7 +86,6 @@ private:
 
     QComboBox *m_variantCombo = nullptr;
     QSpinBox *m_windowSpin = nullptr;
-    QComboBox *m_windowModeCombo = nullptr; ///< Sliding / Fixed windows
     QPushButton *m_analyzeButton = nullptr;
     QPushButton *m_applyButton = nullptr;
     QPushButton *m_revertButton = nullptr;
@@ -92,10 +93,8 @@ private:
     QToolButton *m_sideBySideButton = nullptr;
     QToolButton *m_unifiedButton = nullptr;
     QToolButton *m_suggestionsButton = nullptr;
-    QStackedWidget *m_views = nullptr;           ///< page 0: the diff, 1: the suggestions, 2: measured
+    QStackedWidget *m_views = nullptr;           ///< page 0: the diff, 1: the suggestions
     SuggestionPanel *m_suggestions = nullptr;
-    QToolButton *m_measuredButton = nullptr;
-    MeasuredView *m_measured = nullptr;
     QCheckBox *m_onlyChangedCheck = nullptr;
     QWidget *m_statusRow = nullptr; ///< second row: summary and "Only changed blocks" (diff views only)
     QLabel *m_summaryLabel = nullptr;
@@ -116,6 +115,13 @@ private:
     bool m_ignoreTextChange = false;
     bool m_pinned = false;
     bool m_singleCycleProcessor = false;
+
+    // Measured: the original and the suggestion run on the Kites pipeline, a few
+    // thousand cycles per timer tick, and the count is added to the summary
+    std::unique_ptr<reorder::ProfiledRun> m_runBefore;
+    std::unique_ptr<reorder::ProfiledRun> m_runAfter;
+    QTimer *m_measureTimer = nullptr;
+    QString m_measuredSummary; ///< " · measured on Kites: ..." (empty until there is one)
 };
 
 } // namespace Kites

@@ -197,47 +197,6 @@ std::string dependence(const Context &ctx, int earlier, int later)
     return lineOf(ctx, later) + " depends on " + lineOf(ctx, earlier);
 }
 
-/// Why `moved` and `other` may change places (there is no dependence between them).
-std::string independence(const Context &ctx, int moved, int other)
-{
-    const Instr &a = ctx.program->ins[moved];
-    const Instr &b = ctx.program->ins[other];
-    std::vector<int> shared;
-    for (int k = 0; k < a.nsrc; ++k)
-    {
-        if (reads(ctx, other, a.src[k]) && std::find(shared.begin(), shared.end(), a.src[k]) == shared.end())
-        {
-            shared.push_back(a.src[k]);
-        }
-    }
-    std::string reason;
-    if (shared.empty())
-    {
-        reason = "no shared registers";
-    }
-    else
-    {
-        std::vector<std::string> names;
-        for (int reg : shared)
-        {
-            names.push_back(registerName(ctx, moved, reg));
-        }
-        reason = "both only read " + joinList(names);
-    }
-    if (is_memory(const_cast<Instr *>(&a)) && is_memory(const_cast<Instr *>(&b)))
-    {
-        if (a.cls == CLASS_LOAD && b.cls == CLASS_LOAD)
-        {
-            reason += "; both only read memory";
-        }
-        else
-        {
-            reason += "; different memory: " + memoryOperand(ctx, moved) + " and " + memoryOperand(ctx, other);
-        }
-    }
-    return lineOf(ctx, other) + " (" + reason + ")";
-}
-
 /// "in the instruction just before it" / "with only 1 instruction in between"
 std::string distanceText(int distance)
 {
@@ -624,22 +583,6 @@ std::string moveTooltip(const Context &ctx, const MoveInfo &move)
     }
     html += "<p><b>Why:</b> " + why + "</p>";
 
-    if (!move.passed.empty())
-    {
-        std::vector<std::string> parts;
-        const size_t shown = std::min<size_t>(move.passed.size(), 6);
-        for (size_t i = 0; i < shown; ++i)
-        {
-            parts.push_back(independence(ctx, instruction, move.passed[i]));
-        }
-        if (move.passed.size() > shown)
-        {
-            parts.push_back(plural(static_cast<int>(move.passed.size() - shown), "more line"));
-        }
-        html += "<p><b>Safe:</b> it changes places with " + joinList(parts) +
-                ". None of them reads a register it writes, writes a register it uses, or writes memory it may "
-                "access, so every instruction still gets the same values.</p>";
-    }
     if (move.limit >= 0)
     {
         html += "<p><b>Limit:</b> it cannot go " + std::string(move.limitAbove ? "above " : "below ") +
@@ -740,10 +683,19 @@ std::string blockDecisionHtml(const Context &ctx, int block)
     html += "</p><p><i>How the order is chosen: the block is scheduled in " + windowWord(ctx) + " of " +
             std::to_string(ctx.options.windowSize) +
             " instructions. In each window the scheduler tries the order as written, the longest-chain rule and the "
-            "most-dependents rule (each also with the cross-block precaution: producers that the next block reads "
-            "early go first). It keeps the order with the fewest " + word +
-            "s in the block, then the fewest at the start of the next block, then the one that moves lines the "
-            "least.</i></p>";
+            "most-dependents rule";
+    if (ctx.options.crossBlock)
+    {
+        html += " (each also with the cross-block precaution: producers that the next block reads early go first). "
+                "It keeps the order with the fewest " + word +
+                "s in the block, then the fewest at the start of the next block, then the one that moves lines the "
+                "least.</i></p>";
+    }
+    else
+    {
+        html += ". It keeps the order with the fewest " + word +
+                "s in the block, then the one that moves lines the least (the cross-block precaution is off).</i></p>";
+    }
     return html;
 }
 

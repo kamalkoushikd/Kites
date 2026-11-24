@@ -204,6 +204,7 @@ typedef struct Dag Dag;
 struct Options {
     int window;         /* window size W                                */
     int win_mode;       /* WIN_FIXED or WIN_SLIDE                        */
+    int cross_block;    /* 1 = cross-block precaution on (default), 0 = off */
     int reorder;        /* 0 = keep original order (only count stalls)  */
     int insert_nops;    /* 1 = write nops where stalls remain           */
 };
